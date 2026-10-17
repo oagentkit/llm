@@ -1,0 +1,50 @@
+# llm
+
+模型客户端——多模型降级链/任务级预算/成本记账/分阶段模型路由/主备切换 —— oagentkit 模块矩阵 **tier 2**（集成层，依赖 tier0/tier1 + 重第三方地板）。
+
+```
+go get github.com/oagentkit/llm
+```
+
+| 包 | 职责 |
+|---|---|
+| `llm` | 模型客户端：多模型降级链、任务级预算、成本记账、分阶段路由、主备切换 |
+| `wrap` | 调用包装与限流适配 |
+| `llmtest` | 模型层契约测试套件 |
+
+## 定位
+
+**tier 2** — 集成层，依赖 tier0/tier1 + 重第三方地板。
+
+- 本仓依赖的矩阵内仓：`obs`、`runtime`、`textx`。
+
+## 外部依赖地板
+
+- `github.com/cloudwego/eino`
+- `github.com/meguminnnnnnnnn/go-openai`
+- `github.com/cloudwego/eino-ext`
+- `golang.org/x/time`
+
+## 与 oekit 的关系
+
+本矩阵（oagentkit，Agent/LLM 编排工具链）**依赖** oekit（Open Easy Kit，Go 微服务工具链）：
+`oekit/pkg` / `oekit/concurrency` / `oekit/logx` 等。oekit 是另一套独立矩阵，不是子品牌。
+
+## 开发
+
+```bash
+go test ./... -race
+go vet ./...
+gofmt -l .
+```
+
+规范见 [AGENTS.md](AGENTS.md)。
+
+## License
+
+MIT
+- **降级链的每一跳都必须记录原因**（成本/限流/超时/内容策略），不得静默换模型。
+- **预算判定必须在调用前**，不能事后扣减 —— 事后扣减等于没有预算。
+- **panic 不能只转成 error。** `RunSafe*` 系列会把 panic 收进全局 `PanicHandler`
+  （库不接 `SetPanicHandler`，默认 `log.Printf`）且返回的 `panic: X` 无哨兵类型，
+  无法挂回领域上下文。用 `RunSafeErr` 前先确认丢掉的结构化上下文可接受。
