@@ -11,7 +11,7 @@ require (
 	github.com/oagentkit/obs v0.1.0
 	github.com/oagentkit/runtime v0.1.0
 	github.com/oagentkit/textx v0.1.0
-	github.com/oekit/concurrency v0.6.0
+	github.com/oekit/concurrency v0.9.0
 	github.com/oekit/pkg v0.11.0
 	golang.org/x/time v0.14.0
 )
