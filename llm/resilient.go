@@ -215,7 +215,7 @@ func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error)
 	return &Resilient{
 		chain: chain,
 		cfg:   cfg,
-		breakers: newBreakers(cfg.BreakerTrip, cfg.BreakerCooldown,
+		breakers: newBreakers(
 			breaker.WithConsecutiveFailures(cfg.BreakerTrip),
 			breaker.WithCooldown(cfg.BreakerCooldown),
 			breaker.WithProbeTimeout(cfg.BreakerProbeTimeout)),
