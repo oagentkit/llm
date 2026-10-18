@@ -22,7 +22,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/oagentkit/runtime/breaker"
+	"github.com/oekit/concurrency/breaker"
 	"golang.org/x/time/rate"
 )
 
@@ -134,9 +134,8 @@ type ResilientConfig struct {
 	// BreakerTrip 模型熔断阈值（连续失败次数），默认 3。
 	BreakerTrip int
 	// BreakerCooldown 模型熔断冷却期，默认 5 分钟。
-	BreakerCooldown time.Duration
-	// BaseDelay 重试退避基准，默认 2s（测试可调小）。
-	BaseDelay time.Duration
+	BreakerCooldown time.Duration // BaseDelay 重试退避基准，默认 2s（测试可调小）。
+	BaseDelay       time.Duration
 	// MaxDelay 重试退避上限，默认 30s。
 	MaxDelay time.Duration
 	// BreakerProbeTimeout 熔断半开探测的单次时限。缺省按「单模型一次完整尝试」
@@ -151,10 +150,10 @@ func (c *ResilientConfig) fillDefaults(attemptBudget time.Duration) {
 		c.RetriesPerModel = 2
 	}
 	if c.BreakerTrip <= 0 {
-		c.BreakerTrip = breaker.DefaultTripThreshold
+		c.BreakerTrip = defaultBreakerTrip
 	}
 	if c.BreakerCooldown <= 0 {
-		c.BreakerCooldown = breaker.DefaultCooldown
+		c.BreakerCooldown = defaultBreakerCooldown
 	}
 	if c.BaseDelay <= 0 {
 		c.BaseDelay = 2 * time.Second
@@ -180,7 +179,7 @@ type timeoutProvider interface {
 type Resilient struct {
 	chain    *FallbackChain
 	cfg      ResilientConfig
-	breakers *breaker.Breakers
+	breakers *breakers
 
 	// Budget 任务 token 预算（nil = 不限）。耗尽时全链短路。
 	Budget TokenAccountant
@@ -216,7 +215,9 @@ func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error)
 	return &Resilient{
 		chain: chain,
 		cfg:   cfg,
-		breakers: breaker.NewBreakers(cfg.BreakerTrip, cfg.BreakerCooldown,
+		breakers: newBreakers(cfg.BreakerTrip, cfg.BreakerCooldown,
+			breaker.WithConsecutiveFailures(cfg.BreakerTrip),
+			breaker.WithCooldown(cfg.BreakerCooldown),
 			breaker.WithProbeTimeout(cfg.BreakerProbeTimeout)),
 	}, nil
 }
@@ -360,15 +361,16 @@ func (r *Resilient) stepChain(ctx context.Context, stage string, p Provider, idx
 		return false, nil, false, fmt.Errorf("llm: %s 任务 token 预算已耗尽（%d）", stage, r.Budget.Used())
 	}
 	// 熔断中的模型直接跳过（不记录为 attempt——没真正尝试）
-	if !r.breakers.Allow(p.ModelName()) {
+	gen, ok := r.breakers.allow(ctx, p.ModelName())
+	if !ok {
 		return false, nil, true, nil
 	}
 	// nil model 防御：Allow 已放行（可能占用半开探测配额），必须配对 Failure
 	if isNilModel(p.Model()) {
-		r.breakers.Failure(p.ModelName())
+		r.breakers.failure(ctx, p.ModelName(), gen)
 		return false, &Attempt{Provider: p.Name(), Model: p.ModelName(), Err: fmt.Errorf("provider.Model() 为 nil")}, false, nil
 	}
-	done, att = r.tryProvider(ctx, stage, p, idx, try)
+	done, att = r.tryProvider(ctx, stage, p, idx, gen, try)
 	if done {
 		return true, nil, false, nil
 	}
@@ -392,22 +394,22 @@ func chainExhaustedError(stage string, attempts []Attempt, breakerSkipped int) e
 
 // tryProvider 单次链上尝试：成功收口 / 失败记账 + OnFallback。
 // done=true 表示全链成功可返回；att 为需并入 attempts 的失败记录（成功时 nil）。
-func (r *Resilient) tryProvider(ctx context.Context, stage string, p Provider, idx int, try func(p Provider) error) (done bool, att *Attempt) {
+func (r *Resilient) tryProvider(ctx context.Context, stage string, p Provider, idx int, gen uint64, try func(p Provider) error) (done bool, att *Attempt) {
 	start := time.Now()
 	err := try(p)
 	if err == nil {
-		r.breakers.Success(p.ModelName())
+		r.breakers.success(p.ModelName(), gen)
 		r.rememberModel(p.ModelName())
 		return true, nil
 	}
 	if ctx.Err() != nil {
 		// 用户主动中止：结果未知，走 Abandon（解除半开探测占位、不计失败
 		// 统计——Failure 曾让连续 3 次用户取消把模型熔断 5 分钟）
-		r.breakers.Abandon(p.ModelName())
+		r.breakers.abandon(p.ModelName(), gen)
 		return false, nil
 	}
 	// 真实模型失败：配对 Failure（含半开探测占位的解除）
-	r.breakers.Failure(p.ModelName())
+	r.breakers.failure(ctx, p.ModelName(), gen)
 	att = &Attempt{
 		Provider: p.Name(), Model: p.ModelName(),
 		Err: err, Duration: time.Since(start),

@@ -17,7 +17,7 @@
 ### 分层与依赖
 
 - 依赖严格自底向上，**禁止反向依赖**。本仓是 tier 2，只允许依赖 tier ≤ 2 的仓。
-- 本仓依赖的矩阵内仓：`obs`、`runtime`、`textx`。
+- 本仓依赖的矩阵内仓：`obs`、`textx`。
 - 改 module 路径必须同步：全部 import、go.mod、README 安装行。
 
 ### 错误处理

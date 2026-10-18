@@ -14,7 +14,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/oagentkit/llm/llmtest"
-	"github.com/oagentkit/runtime/breaker"
 )
 
 // 桩统一走 llmtest（脚本化 Model/Provider）——此前本文件四份手写桩之一。
@@ -539,7 +538,7 @@ func TestResilientUserCancelDoesNotTripBreaker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 连续取消次数超过熔断阈值（曾触发连续失败熔断）
-	for i := 0; i < breaker.DefaultTripThreshold+2; i++ {
+	for i := 0; i < defaultBreakerTrip+2; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 		_, gerr := r.Generate(ctx, "test", msgs("q"))
 		cancel()
@@ -547,14 +546,14 @@ func TestResilientUserCancelDoesNotTripBreaker(t *testing.T) {
 			t.Fatal("取消应失败返回")
 		}
 	}
-	if bm.calls.Load() != int32(breaker.DefaultTripThreshold+2) {
+	if bm.calls.Load() != int32(defaultBreakerTrip+2) {
 		t.Fatalf("每次都应真实发起调用: %d", bm.calls.Load())
 	}
 	// 取消不计失败：模型未被熔断——超时窗口内仍可继续打到该模型
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	_, _ = r.Generate(ctx, "test", msgs("q"))
-	if bm.calls.Load() != int32(breaker.DefaultTripThreshold+3) {
+	if bm.calls.Load() != int32(defaultBreakerTrip+3) {
 		t.Fatalf("取消不得熔断模型（下一次调用仍应打到它）: %d", bm.calls.Load())
 	}
 }
