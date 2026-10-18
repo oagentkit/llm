@@ -16,8 +16,6 @@ const (
 	defaultBreakerTrip = 3
 	// defaultBreakerCooldown 模型熔断冷却期。
 	defaultBreakerCooldown = 5 * time.Minute
-	// defaultBreakerProbeTimeout 半开探测的单次时限（用户显式置零时的兜底）。
-	defaultBreakerProbeTimeout = time.Minute
 )
 
 // breakers 是按模型名分桶的熔断器集合。
