@@ -2,6 +2,22 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.0] — 2026-10-20
+
+### 新增(obsx)：接收 obs/obsx —— LLM 调用观测与模型客户端住在一起
+
+自 github.com/oagentkit/obs/obsx 迁入（obs v0.9.0 起该路径退役）。
+obsx 是 eino callbacks 适配层（绑框架），而本仓早已 import 它做成本记账与
+阶段打标 —— 同一关注点，两个包住一起更顺。迁出后 obs 仓的 eino 依赖消失，
+langfuse / audit 两个轻包不再被白拖 27 个第三方模块。
+包名与语义不变（LLM 调用追踪 + token 用量采集 + 分阶段打标），
+只是 import 路径从 github.com/oagentkit/obs/obsx 变为
+github.com/oagentkit/llm/obsx。
+关联 oagentkit/guardx#3
+
+- 文档(changelog)：按远端真实 tag 重生成
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
+
 ## [v0.11.0] — 2026-10-19
 
 - 杂务(deps)：依赖地板对齐远端最新（obs v0.7.0 / textx v0.5.0） (13)
