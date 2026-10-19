@@ -8,6 +8,7 @@ go get github.com/oagentkit/llm
 
 | 包 | 职责 |
 |---|---|
+| `obsx` | eino callbacks 体系的 LLM 调用追踪 + token 用量采集 + 分阶段打标（自 `obs/obsx` 迁入 v0.12.0） |
 | `llm` | 模型客户端：多模型降级链、任务级预算、成本记账、分阶段路由、主备切换 |
 | `wrap` | 调用包装与限流适配 |
 | `llmtest` | 模型层契约测试套件 |

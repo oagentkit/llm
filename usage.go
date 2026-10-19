@@ -16,7 +16,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 
-	"github.com/oagentkit/obs/obsx"
+	"github.com/oagentkit/llm/obsx"
 )
 
 // UsageRecord 单次 LLM 调用的用量记录。

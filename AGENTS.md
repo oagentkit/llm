@@ -8,6 +8,7 @@
 
 ```
 `/`（module 根，包名 llm → import `github.com/oagentkit/llm`）
+`obsx/`  ← 自 obs 迁入（v0.12.0）：LLM 调用追踪 + token 用量 + 分阶段打标
 `wrap/`
 `llmtest/`
 ```

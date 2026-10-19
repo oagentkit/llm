@@ -22,7 +22,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"golang.org/x/time/rate"
 
-	"github.com/oagentkit/obs/obsx"
+	"github.com/oagentkit/llm/obsx"
 	"github.com/oagentkit/textx/textutil"
 	"github.com/oekit/pkg/jsonrepair"
 	"github.com/oekit/pkg/mathx"
