@@ -2,6 +2,51 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.13.0] — 2026-10-20
+
+### 新增(pricing)：内建模型价表 + 「价格未知」不再静默记 0
+
+成本追踪能力本来是完整的（CostTracker/CostRecord），但**价格不在这一层**：
+CostTracker.Record 要求调用方每次传入单价，llm 自己既不持有「模型→价格」映射，
+也没有按模型名查价的入口。于是每个下游都得自己维护一张表（通常在应用配置里，
+键是模型名精确匹配），漏配就静默记 0 —— 0 成本在账单上与「免费模型」不可区分。
+改动：
+1) 新增 pricing.go：内建价表 + 归一化查价 + 调用方覆盖
+   - PriceTable / NewPriceTable(overrides) / DefaultPriceTable / LookupPrice /
+     LookupPriceStrict / ErrPriceUnknown
+   - 归一化规则（README 与 Lookup 文档同源）：原名 → 去部署前缀 → 去日期后缀
+   - **不做最长前缀回落**：那会把同主干异价 SKU 静默定价错（gpt-4o-mini 按
+     gpt-4o 计）。「静默算错」比「显式未知」更危险。
+2) 单位统一为「美元 / 每 1M token」。仓里此前并存两套单位
+   （Price 是每 1M，Provider.CostPer1KTokens 与 Record 的 costPer1K 是每 1K），
+   差一个数量级。新 API 全部收敛到每 1M，旧入口保留但标记 Deprecated。
+3) 「价格未知」不记 0：CostRecord 增 PriceStatus/PriceKey/PriceMatched；
+   CostTracker 增 RecordAuto/RecordPriced/RecordUnpriced/Unpriced/UnpricedCount；
+   ModelSummary 增 PricedCalls/UnpricedCalls。判读口径：
+     TotalCostUSD==0 && UnpricedCalls==0  → 真免费
+     TotalCostUSD==0 && UnpricedCalls>0  → 成本口径不完整（不是免费）
+   需要硬失败的出账链路用 LookupPriceStrict（ErrPriceUnknown）。
+4) 接入生产路径：Provider 侧新增可选接口 PricedProvider（显式单价，优先于价表）；
+   Resilient 增 PriceTable 字段，buildClient 的记账改为
+   providerPrice(p, table) —— Provider 显式价 > per-1K 非零 > 价表按模型名查 >
+   未知。此前这条路径恒记 0（Provider 不给价时 costPer1K 为零值）。
+5) README 增「成本与定价」章节：单位、归一化规则、覆盖方式、未知价的判读口径，
+   以及**价目表时效性声明**（2026-10-20 采集的官方 list price 快照，必然滞后于
+   厂商公告；只收美元计价模型，人民币/阶梯计价的请覆盖——硬折算等于给出一个
+   看起来精确的错误数字）。
+验证：
+- GOWORK=off go test -race ./... 全绿
+- 新增用例 14 个（含子用例）：已知模型按关系算价、未知模型**不记 0**且可查询、
+  汇总区分「零成本」与「价格未知」、覆盖价优先、别名后缀可查、Provider 单价优先级、
+  Resilient 生产路径端到端
+- 单测断言一律用**关系**（查表单价 × token 数 == 记录成本），不写死价目表数值——
+  价目表随厂商调价变动，写死数字会随表更新假失败
+关联 issue oagentkit/llm#9
+
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成） (#8)
+
+- Merge pull request #13 from oagentkit/feat/builtin-pricing
+
 ## [v0.12.1] — 2026-10-20
 
 ### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反 (#7)
