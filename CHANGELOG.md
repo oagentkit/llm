@@ -2,6 +2,14 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.12.1] — 2026-10-20
+
+### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反 (#7)
+
+Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
+
 ## [v0.12.0] — 2026-10-20
 
 ### 新增(obsx)：接收 obs/obsx —— LLM 调用观测与模型客户端住在一起
