@@ -43,17 +43,11 @@ CostTracker.Record 要求调用方每次传入单价，llm 自己既不持有「
   价目表随厂商调价变动，写死数字会随表更新假失败
 关联 issue oagentkit/llm#9
 
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成） (#8)
-
-- Merge pull request #13 from oagentkit/feat/builtin-pricing
-
 ## [v0.12.1] — 2026-10-20
 
 ### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反 (#7)
 
 Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
 
 ## [v0.12.0] — 2026-10-20
 
@@ -67,9 +61,6 @@ langfuse / audit 两个轻包不再被白拖 27 个第三方模块。
 只是 import 路径从 github.com/oagentkit/obs/obsx 变为
 github.com/oagentkit/llm/obsx。
 关联 oagentkit/guardx#3
-
-- 文档(changelog)：按远端真实 tag 重生成
-- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
 
 ## [v0.11.0] — 2026-10-19
 
