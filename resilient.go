@@ -187,6 +187,12 @@ type Resilient struct {
 	Limiter *rate.Limiter
 	// Tracker 成本追踪器（nil = 不追踪）。记账跟随实际执行的模型。
 	Tracker *CostTracker
+	// PriceTable 价表（nil = llm 内建价表）。
+	//
+	// 单价解析优先级：Provider 显式给价（PricedProvider / CostPer1KTokens）
+	// > 按模型名查本表。**都查不到时记为「价格未知」**（CostRecord.PriceStatus
+	// = PriceUnpriced），不是 0 成本——否则成本看板恒为 0 而无人察觉。
+	PriceTable *PriceTable
 	// OnUsage token 使用回调（model = 实际执行的模型）。
 	OnUsage func(model, stage string, prompt, completion int)
 	// OnFallback 降级事件回调（from = 失败模型，to = 切换到的模型）。
@@ -501,14 +507,20 @@ func (r *Resilient) buildClient(p Provider) *Client {
 	// 仅在确有记账出口时设置 OnUsage：恒设置会让 generateRetry 的 Client 记账
 	// 标记误跳过 callbacks 侧的 NewUsageHandler（调用方可能只配了 callbacks）
 	if r.OnUsage != nil || r.Tracker != nil {
-		costPer1K := [2]float64{}
-		costPer1K[0], costPer1K[1] = p.CostPer1KTokens()
+		// 单价解析：Provider 显式给价优先，否则按模型名查价表。
+		// priced=false = 价格未知（不记 0，见 CostRecord.PriceStatus）。
+		price, priced := providerPrice(p, r.PriceTable)
 		c.OnUsage = func(stage string, prompt, completion int) {
 			if r.OnUsage != nil {
 				r.OnUsage(p.ModelName(), stage, prompt, completion)
 			}
 			if r.Tracker != nil {
-				r.Tracker.Record(p.ModelName(), stage, prompt, completion, costPer1K)
+				if priced {
+					r.Tracker.RecordPriced(p.ModelName(), stage, prompt, completion, price)
+				} else {
+					// 价格未知：记「未定价」而不是 0 成本——用量照记，成本口径显式留白。
+					r.Tracker.RecordUnpriced(p.ModelName(), stage, prompt, completion)
+				}
 			}
 		}
 	}
