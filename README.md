@@ -17,7 +17,8 @@ go get github.com/oagentkit/llm
 
 **tier 2** — 集成层，依赖 tier0/tier1 + 重第三方地板。
 
-- 本仓依赖的矩阵内仓：`obs`、`textx`。
+- 本仓依赖的矩阵内仓：`textx`。
+  （`obsx` 已于 v0.12.0 从 `obs/obsx` 迁入本仓，`obs` 不再是外部依赖。）
 
 ## 外部依赖地板
 
