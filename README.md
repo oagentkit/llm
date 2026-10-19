@@ -46,6 +46,8 @@ gofmt -l .
 MIT
 - **降级链的每一跳都必须记录原因**（成本/限流/超时/内容策略），不得静默换模型。
 - **预算判定必须在调用前**，不能事后扣减 —— 事后扣减等于没有预算。
-- **panic 不能只转成 error。** `RunSafe*` 系列会把 panic 收进全局 `PanicHandler`
-  （库不接 `SetPanicHandler`，默认 `log.Printf`）且返回的 `panic: X` 无哨兵类型，
-  无法挂回领域上下文。用 `RunSafeErr` 前先确认丢掉的结构化上下文可接受。
+- **panic 不能只转成 error。** `RunSafe*` 系列属于 `github.com/oekit/concurrency/async`，
+  会把 panic 收进全局 `async.PanicHandler`（默认 `log.Printf`，进程入口可调
+  `async.SetPanicHandler` 换成结构化日志），并以 `async.PanicError` 哨兵类型返回。
+  本仓只用 `async.GoSafe` 系列，不在库内暴露 panic 处理注入点。
+  要拿回结构化上下文，自己在 `recover` 分支里转成 `errors.Wrap`。
