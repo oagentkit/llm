@@ -366,7 +366,6 @@ TestResilientUserCancelDoesNotTripBreaker 两条熔断契约测试），gofmt �
 
 - 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」
 
-chore(deps): 依赖地板升到「历史最新 + 0.1.0」
 本轮做了版本线重置：清空全部历史 tag，按「历史最新 + 0.1.0」重打新版本
 （如 llm v0.6.0 → v0.7.0、toolgate v0.6.1 → v0.7.0、agentkit v1.3.0 → v1.4.0）。
 各仓 go.mod 的矩阵内依赖地板同步跟进到新版本号。
