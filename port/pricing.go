@@ -81,7 +81,10 @@ const (
 // 命中方式对外可见，是为了让调用方能审计「这个价格是怎么来的」——
 // 归一化命中与精确命中在**同族异价 SKU** 上的后果不同（见 PriceTable.Lookup）。
 type PriceLookup struct {
-	// Key 命中的价表键（未命中为空串）。
+	// Key 这一项价的**原始键**（未命中为空串）。
+	//
+	// 内建项 = 基础形态模型名；覆盖项 = 调用方给的键（原样保留，可能带部署前缀 /
+	// 日期后缀）。它就是**查回同一份价**用的键：Lookup(Key) 必然拿到同一个价。
 	Key string
 	// Kind 命中方式。
 	Kind MatchKind
@@ -132,8 +135,23 @@ var builtinPricing = map[string]Price{
 }
 
 // PriceTable 价表：内建价 + 调用方覆盖。**构造后只读**，可并发使用。
+//
+// 表内按**基座形态**（基础模型名，无部署前缀 / 日期后缀）存键——内建价如此，
+// 调用方覆盖也先折算成基座形态再入库（见 NewPriceTable）。于是「查价」与
+// 「存价」用的是同一套规则：调用方配的价不会再被内建参考价悄悄顶掉。
 type PriceTable struct {
-	table map[string]Price
+	table map[string]priceEntry
+}
+
+// priceEntry 表里的一项。
+type priceEntry struct {
+	// price 单价（美元 / 每 1M token）。
+	price Price
+	// key 这一项价的**原始键**：内建项 = 基础形态模型名；覆盖项 = 调用方给的键
+	// （原样保留，便于审计「这个价是谁配的」）。
+	key string
+	// override 是否是调用方覆盖项（false = 内建参考价）。
+	override bool
 }
 
 // defaultPriceTable 内建表只构造一次（sync.OnceValue：Go 1.21+）。
@@ -147,39 +165,82 @@ func DefaultPriceTable() *PriceTable { return defaultPriceTable() }
 
 // NewPriceTable 造一份价表：内建价 + overrides 覆盖。
 //
-// overrides 的键走与内建表**同一套归一化规则**（见 normalizeCandidates），
-// 所以覆盖 `mimo-v2.5-pro` 也能盖住 `mimo-v2.5-pro-20250101` 这类变体。
+// # 覆盖键与内建表走**同一套归一化规则**
+//
+// overrides 的键先折算成**基座形态**（去掉部署前缀 + 日期后缀，见 baseForm）
+// 再入库——与内建表的键形态一致。所以覆盖是**双向**的：
+//
+//   - 覆盖 `mimo-v2.5-pro` 能盖住 `mimo-v2.5-pro-20250101` 这类变体；
+//   - 覆盖 `mimo-v2.5-pro-20250101` 同样能盖住 `mimo-v2.5-pro`。
+//
 // 覆盖优先于内建价。
+//
+// # 同一基座上的多个覆盖键：一条确定的优先级规则
+//
+// 两个覆盖键折算后可能落到**同一个基座**（例如同时给 `gpt-4o` 与
+// `openai/gpt-4o`）。此时**只有一个生效**，按下列优先级（高 → 低）：
+//
+//  1. **基础形态**的键优先——`gpt-4o` 优先于 `openai/gpt-4o`、`gpt-4o-2024-08-06`；
+//  2. 同为派生形态时，**更长的键**优先（更具体）；
+//  3. 再同则**字典序小**的键优先（兜底，保证跨进程、跨 map 迭代顺序都稳定）。
+//
+// 落选的键**整族不生效**（不是只在自己那条查询上落选）——一个基座只有一个价。
+// 生效的是哪个键，查价结果的 PriceLookup.Key 会原样报出来。
 func NewPriceTable(overrides map[string]Price) *PriceTable {
 	return newPriceTable(overrides)
 }
 
 func newPriceTable(overrides map[string]Price) *PriceTable {
-	t := &PriceTable{table: make(map[string]Price, len(builtinPricing)+len(overrides))}
+	t := &PriceTable{table: make(map[string]priceEntry, len(builtinPricing)+len(overrides))}
 	for k, v := range builtinPricing {
-		t.table[k] = v
+		t.table[k] = priceEntry{price: v, key: k}
 	}
-	for k, v := range overrides {
-		t.table[k] = v
+	// 覆盖键按优先级**排序后**入库：map 的迭代顺序是随机的，不排序就会让同一份
+	// 配置在不同进程里选出不同的价（见 overridePriority）。
+	keys := make([]string, 0, len(overrides))
+	for k := range overrides {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return overridePriority(keys[i], keys[j]) < 0 })
+	for _, k := range keys {
+		t.applyOverride(k, overrides[k])
 	}
 	return t
 }
 
+// applyOverride 把一个覆盖写进表里（键先折算成基座形态）。
+//
+// 覆盖优先于内建价；同一基座上已有覆盖时按 overridePriority 比优先级，
+// 落选者**不写入**——所以结果与 overrides 的 map 迭代顺序无关。
+func (t *PriceTable) applyOverride(model string, price Price) {
+	base := baseForm(model)
+	if e, ok := t.table[base]; ok && e.override && overridePriority(model, e.key) > 0 {
+		return
+	}
+	t.table[base] = priceEntry{price: price, key: model, override: true}
+}
+
 // WithOverride 返回一份新价表：当前表 + 该覆盖（不动原表，原表可能正被并发读）。
+//
+// 覆盖键与 NewPriceTable 的 overrides 走**同一套归一化规则**（折算成基座形态
+// 再入库），同一基座上的优先级规则也相同（见 NewPriceTable 的文档）。
 func (t *PriceTable) WithOverride(model string, price Price) *PriceTable {
-	cp := &PriceTable{table: make(map[string]Price, len(t.table)+1)}
+	cp := &PriceTable{table: make(map[string]priceEntry, len(t.table)+1)}
 	for k, v := range t.table {
 		cp.table[k] = v
 	}
-	cp.table[model] = price
+	cp.applyOverride(model, price)
 	return cp
 }
 
 // Models 返回表里的全部模型名（字典序）。
+//
+// 覆盖项返回的是**调用方给的原始键**（未折算的形态），与 Lookup 的
+// PriceLookup.Key 一致——查这些键都能查到同一份价。
 func (t *PriceTable) Models() []string {
 	out := make([]string, 0, len(t.table))
-	for k := range t.table {
-		out = append(out, k)
+	for _, e := range t.table {
+		out = append(out, e.key)
 	}
 	sort.Strings(out)
 	return out
@@ -195,6 +256,17 @@ func (t *PriceTable) Models() []string {
 //     `gpt-4o-2024-08-06` → `gpt-4o`；
 //  4. 上面组合都试过仍不中 → **未命中**（MatchNone，价格未知）。
 //
+// # 覆盖键与内建键同一套规则
+//
+// 价表里的键都是**基座形态**（内建如此，覆盖键入库前也折算过，见 NewPriceTable），
+// 所以查 `mimo-v2.5-pro` 与查 `mimo-v2.5-pro-20250101` 落到同一项——
+// 调用方显式配的单价不会再被内建参考价悄悄顶掉。
+//
+// # MatchExact / MatchNormalized 的判据
+//
+// PriceLookup.Key 报的是**这一项价的原始键**。原始键与查询名**完全相同**
+// ⇒ MatchExact；否则（任一侧需要去部署前缀 / 日期后缀才对上）⇒ MatchNormalized。
+//
 // # 为什么不做「最长前缀回落」
 //
 // 旧版 PriceOf/PriceOfMatched 会做最长前缀回落，那会把**同主干异价 SKU** 静默
@@ -203,12 +275,12 @@ func (t *PriceTable) Models() []string {
 // 收录进表里（旧 API 仍保留该行为，见 PriceOf 的 Deprecated 说明）。
 func (t *PriceTable) Lookup(model string) (Price, PriceLookup) {
 	for _, cand := range normalizeCandidates(model) {
-		if p, ok := t.table[cand]; ok {
-			kind := MatchExact
-			if cand != model {
-				kind = MatchNormalized
+		if e, ok := t.table[cand]; ok {
+			kind := MatchNormalized
+			if e.key == model {
+				kind = MatchExact
 			}
-			return p, PriceLookup{Key: cand, Kind: kind}
+			return e.price, PriceLookup{Key: e.key, Kind: kind}
 		}
 	}
 	return Price{}, PriceLookup{Kind: MatchNone}
@@ -261,6 +333,46 @@ func normalizeCandidates(model string) []string {
 	add(dateSuffixRe.ReplaceAllString(base, ""))
 	add(dateSuffixRe.ReplaceAllString(model, ""))
 	return out
+}
+
+// baseForm 返回模型的**基座形态**：去掉部署前缀（最后一个 '/' 之后）与日期后缀。
+//
+// 它就是 normalizeCandidates 候选链里**归一化程度最高**的一档（C2），
+// 也是内建价表所有键的形态。覆盖键入库前一律先折算成基座形态——于是
+// 「存价」与「查价」用的是同一套规则，调用方配的价不会被内建参考价顶掉。
+func baseForm(model string) string {
+	base := model
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		base = model[i+1:]
+	}
+	base = dateSuffixRe.ReplaceAllString(base, "")
+	if base == "" {
+		return model // 退化输入（纯前缀等）：原样兜底
+	}
+	return base
+}
+
+// overridePriority 比较两个覆盖键的优先级：返回负数表示 a 优先于 b。
+//
+// 规则见 NewPriceTable 的文档（基础形态 > 更长的键 > 字典序小的键）。它是
+// 一个**全序**——任意两个不同的键都能分出先后，所以「同一基座上谁的覆盖生效」
+// 与 overrides 的 map 迭代顺序无关：map 迭代顺序是随机的，不定序就会让同一份
+// 配置在不同进程里选出不同的价。
+func overridePriority(a, b string) int {
+	aBase, bBase := a == baseForm(a), b == baseForm(b)
+	if aBase != bBase {
+		if aBase {
+			return -1
+		}
+		return 1
+	}
+	if len(a) != len(b) {
+		if len(a) > len(b) {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 // ---------------------------------------------------------------- 旧 API

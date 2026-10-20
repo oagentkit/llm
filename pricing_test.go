@@ -81,6 +81,35 @@ func TestProviderPricePriority(t *testing.T) {
 	}
 }
 
+// TestNewPriceTable_OverrideKeyNormalized_IssueRepro 复现 issue #26 的那段程序
+// （走公共 API 的类型别名路径）：覆盖键带日期后缀时，**不带形态**的查询必须
+// 拿到覆盖价 {9,9}，而不是内建参考价。
+func TestNewPriceTable_OverrideKeyNormalized_IssueRepro(t *testing.T) {
+	override := Price{InputPerM: 9.0, OutputPerM: 9.0}
+	rev := NewPriceTable(map[string]Price{
+		"mimo-v2.5-pro-20250101": override,
+	})
+
+	// 第一行：同形态查询 → 覆盖价
+	p, lk := rev.Lookup("mimo-v2.5-pro-20250101")
+	if !lk.Found() || p != override {
+		t.Fatalf("同形态查询应是覆盖价: price=%v lookup=%+v", p, lk)
+	}
+
+	// 第二行（**修复点**）：不带形态的查询 → 也应是覆盖价 {9,9}
+	p, lk = rev.Lookup("mimo-v2.5-pro")
+	if !lk.Found() {
+		t.Fatal("不带形态的查询应能查到价")
+	}
+	if p != override {
+		t.Fatalf("不带形态的查询应是覆盖价 %v 而不是内建参考价，实际 %v", override, p)
+	}
+	// 内建参考价确实与之不同（否则用例失去意义）
+	if builtin, _ := DefaultPriceTable().Lookup("mimo-v2.5-pro"); builtin == override {
+		t.Fatal("内建参考价与覆盖价相同，本用例失去意义")
+	}
+}
+
 // namedProvider 覆盖 ModelName 的 llmtest.Provider 桩（llmtest 的 ModelName
 // 固定是 Label+"-model"，这里要精确控制模型名才能命中价表）。
 type namedProvider struct {
