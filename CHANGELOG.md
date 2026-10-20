@@ -45,7 +45,7 @@ CostTracker.Record 要求调用方每次传入单价，llm 自己既不持有「
 
 ## [v0.12.1] — 2026-10-20
 
-### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反 (#7)
+### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反
 
 Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -68,7 +68,7 @@ github.com/oagentkit/llm/obsx。
 
 ## [v0.10.0] — 2026-10-19
 
-- 杂务(deps)：依赖地板对齐远端最新（obs v0.5.0 / textx v0.4.0 / concurrency v0.17.1 / pkg v0.15.1 / logx v0.7.1） (#13)
+- 杂务(deps)：依赖地板对齐远端最新（obs v0.5.0 / textx v0.4.0 / concurrency v0.17.1 / pkg v0.15.1 / logx v0.7.1）
 
 ## [v0.9.0] — 2026-10-19
 
@@ -176,10 +176,10 @@ go.mod 摘除 oekit/concurrency 之外对 runtime 的依赖（本仓不再引用
 门禁：go build / go vet / go test -race 全绿（含 TestResilientBreakerTrips 与
 TestResilientUserCancelDoesNotTripBreaker 两条熔断契约测试），gofmt 干净。
 
-- 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」 (#4)
-- 杂务(deps)：跟进最新 tag (#3)
-- 杂务(deps)：oekit 依赖升级 (#2)
-- 杂务(deps)：跨仓依赖升级 (#1)
+- 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」
+- 杂务(deps)：跟进最新 tag
+- 杂务(deps)：oekit 依赖升级
+- 杂务(deps)：跨仓依赖升级
 - 杂务(deps)：oekit/concurrency v0.6.0 -> v0.9.0
 
 - CI：接入 org 共享门禁（规则本体在 oagentkit/.github）
