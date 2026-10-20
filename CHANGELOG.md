@@ -2,6 +2,10 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.14.1] — 2026-10-20
+
+- 与 v0.14.0 相比无代码差异（版本号/打包变更）
+
 ## [v0.14.0] — 2026-10-20
 
 ### 新增(port)：窄接口层——不依赖 eino 的降级链/预算/成本
