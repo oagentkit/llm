@@ -2,6 +2,76 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.14.2] — 2026-10-20
+
+### 修复(pricing)：覆盖键归一化——调用方显式配的单价不再被内建参考价顶掉
+
+承接 oagentkit/llm#26。`NewPriceTable(overrides)` 把 overrides 的键**原样**存进表里，
+而 `Lookup` 只对**查询侧**跑 `normalizeCandidates`。净效果：
+- 覆盖键**带**日期后缀或部署前缀时，只有**同样形态**的查询能命中它；
+- 不带形态的查询会**静默命中内建参考表**——`Found()` 仍为 `true`、命中方式还是
+  `exact`，调用方以为「有价」，实际用的是内建快照的价，**调用方显式配的单价被无视**。
+影响是**静默**的：不报错、`Found()` 为 true、`kind` 还是 `exact`——没有任何信号提示
+「这个价不是你配的」。按内建价记账 = 与调用方意图不符的成本数字。
+## 根因
+- `port/pricing.go` `newPriceTable`：`t.table[k] = v` 原样赋值；
+- `port/pricing.go` `Lookup`：只对**查询侧**归一化；
+- 而内建价表 `builtinPricing` 的键是**基础形态**（无日期后缀、无部署前缀）——
+  同一个表里两套键形态，覆盖项因此可能「够不着」基础形态的查询。
+`WithOverride` 有同样缺陷。`NewPriceTable` 的文档**早已承诺**了正确行为
+（「overrides 的键走与内建表同一套归一化规则」）——**文档是对的，代码是错的**，
+本修复是让实现对齐既有承诺。
+## 改动（`port/pricing.go`）
+- 表内**统一按基座形态存键**：新增 `baseForm()`（去部署前缀 + 去日期后缀，
+  与 `normalizeCandidates` 的 C2 档一致，即内建表的键形态）；覆盖项入库前先折算。
+  ⇒ 覆盖是**双向**的：覆盖 `mimo-v2.5-pro` 能盖住 `mimo-v2.5-pro-20250101`，
+  覆盖 `mimo-v2.5-pro-20250101` 同样能盖住 `mimo-v2.5-pro`。
+- 新增 `overridePriority()`：同一基座上多个覆盖键的**全序**优先级
+  （基础形态 > 更长的键 > 字典序小的键），并显式排序后入库 ⇒ 结果与
+  `map` 迭代顺序、与进程都无关（随机迭代顺序会让同一份配置在不同进程选出不同的价）。
+- 表值类型 `map[string]Price` → `map[string]priceEntry{price, key, override}`：
+  保留每一项价的**原始键**（便于审计「这个价是谁配的」），并让
+  `PriceLookup.Key` 报原始键——`Lookup(Key)` 必然拿到同一份价。
+- `Kind` 判据改为「原始键 == 查询名 ⇒ `MatchExact`」：覆盖键原样查回仍报 exact，
+  走归一化才对上则报 normalized。
+- `WithOverride` 改走同一套 `applyOverride`，与 `NewPriceTable` 规则一致。
+**公共 API 签名零改动**（`PriceLookup` 未加字段——加字段会破坏外部未命名字段
+复合字面量的源码兼容）。
+## 遮蔽风险（已实证排除）
+归一化只去「最后一个 `/` 之后」和「结尾日期」两段：`gpt-4o-mini-2024-08-06` 折出来
+是 `gpt-4o-mini` 而**不是** `gpt-4o` ⇒ 同主干异价 SKU 不会被跨族吞掉（保留
+`Lookup` 刻意不做前缀回落的设计）。另用 `TestBuiltinPricingKeysAreBaseForms`
+把「内建表 19 个键每一个本身就是基座形态」钉住——将来加价目表键时若违反会立刻红。
+并对内建表 18 个模型 × 18 个变体做了交叉检查：**0 处遮蔽、0 处漏查**。
+## 验证
+新增 13 个测试（`port/pricing_test.go`）+ 根包 issue 复现测试
+（`pricing_test.go`），覆盖：覆盖键带日期后缀 / 带部署前缀 / 基础形态盖住变体、
+内建表不受影响、优先级规则与严格全序、同族只留一个价、`WithOverride` 同规则、
+不遮蔽兄弟模型、内建键形态、查回键的幂等性、并发安全。
+另做了**反向验证**：临时把覆盖键改回「原样入库」，两个用例立刻失败并复现 issue
+的原始症状（`Lookup("mimo-v2.5-pro")` got={1 3} want={9 9}、
+`Lookup("gpt-4o")` got={2.5 10} want={1 2}），随后已还原——证明测试确实能抓住这个 bug。
+```
+$ go build ./... && go vet ./... && gofmt -l .
+$ go test -count=1 ./...         ok（5 个包）
+$ go test -count=1 -race ./...   ok（5 个包）
+```
+关联：oagentkit/llm#26
+
+- 文档(changelog)：按新生成器规则重生成 CHANGELOG.md
+
+生成器修复（oagentkit/matrix-tools#43）落地：
+① `[round-N] ` 前缀被剥离 → conventional commit 解析不再失效，
+   **commit body 保留**（此前整段被丢弃，发布说明只剩标题）；
+② 非 conventional 提交也保留 body；
+③ `--check` 识别「待发版段」（预写了但还没打 tag 的那段）。
+本 PR 恢复的是**本就在 commit body 里**的正文（迁移步骤、代码块、
+判据锚点）——此前被 `[round-N] ` 前缀导致的解析失败丢弃了。
+**没有任何发布说明内容被删除**：删除的行都能在新增行里找到对应
+（规范化掉 `(#N)` 与 `[round-N] ` 前缀后逐行比对）。
+关联：oagentkit/matrix-tools#43、oagentkit/matrix-tools#40
+
+
 ## [v0.14.1] — 2026-10-20
 
 - 与 v0.14.0 相比无代码差异（版本号/打包变更）
