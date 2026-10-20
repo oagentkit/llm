@@ -2,9 +2,76 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.14.0] — 2026-10-20
+
+### 新增(port)：窄接口层——不依赖 eino 的降级链/预算/成本
+
+## 根因
+本仓全部对外能力都长在 eino 的类型上：
+    func NewClient(m model.BaseChatModel, modelName string, budget TokenAccountant) *Client
+    func (c *Client) Generate(ctx, stage, msgs []*schema.Message) (*schema.Message, error)
+非 eino 生态的宿主想接一个**单方法**窄接口（如
+`Complete(ctx, req LLMRequest) (string, error)`），只能自己重写：拼请求体、
+解析响应、判错误码、算超时、处理 JSON 模式。代价不只是代码量，还有**边界易错**
+——HTTP 状态码判错就会静默把失败当成功（issue llm#11 里两个下游就在各写一遍）。
+## 改动
+### 1) 新增 `port` 包（**不引 eino**）
+    type Completer interface {
+        Complete(ctx context.Context, req Request) (string, error)
+    }
+    chain := port.NewChain(
+        port.WithCompleter("gpt-4o", myCompleter),   // 先注册者优先
+        port.WithCompleter("deepseek-chat", backup),  // 失败切下一环
+        port.WithBudget(port.NewBudget(100000)),     // 预算耗尽 → 调用前拦下
+        port.WithTracker(port.NewCostTracker()),     // 按价表计价并记账
+    )
+    out, err := chain.Complete(ctx, port.Request{Prompt: "…", Stage: "R1"})
+降级链 / 任务级预算 / 成本记账在窄接口路径上**真的生效**，不是只把请求转发出去：
+- 预算判定在**调用前**（事后扣减等于没有预算），耗尽则**一次都不调用**模型；
+- 失败按错误分类重试或切下一环，每环节独立熔断分桶；
+- 成本按内建价表记账，价表未收录的模型记为**未定价**（不记 0）；
+- 另附 `ClassifyStatus`（按 HTTP 状态码判可重试），免得每个宿主各写一遍、各判错一遍。
+### 2) 无 eino 的内核下沉到 `port`，根包用**类型别名**保持 API 不变
+预算 / 成本 / 价表 / 熔断的实现**本来就不依赖 eino**，却原先住在根包 `llm` 里，
+而根包因为 client.go 依赖 eino 而「整包不可用」——宿主连「记一笔 token」都用不上。
+下沉后：
+- 根包 `llm.Budget` / `llm.CostTracker` / `llm.Price` / `llm.PriceTable` 等
+  全部是 `port.X` 的**类型别名**（`=`），**对外 API 一字未变**，调用方的类型断言
+  与转换全部照旧生效；
+- 两条路径**共用同一份**预算/成本/价表实现 ⇒ 口径完全一致，不会出现两套算账；
+- `providerPrice` 留在根包（它依赖 eino 耦合的 `Provider` 接口）。
+## 依赖面证明（不引 eino）
+    $ go list -deps ./port | grep -c cloudwego/eino
+    0
+    $ go list -deps ./port | grep -E '^[a-z0-9.-]+\.[a-z]+/' | sort -u
+    github.com/oagentkit/llm/port
+    github.com/oagentkit/textx/textutil
+    github.com/oekit/concurrency/breaker
+    github.com/oekit/concurrency/window
+    github.com/oekit/pkg/stringx
+即：标准库 + oekit/concurrency（熔断）+ textx（token 估算），**无 eino、无 go-openai、
+无 sonic**。
+## 验收（假模型，不需要真网络）
+- `TestChainFallsBackToNextCompleter` —— 首环节失败 → 切到备选；成本记在**实际执行的模型**上
+- `TestChainBudgetExhaustedRejected` —— 预算耗尽 → 返回 ErrBudgetExhausted，且**模型一次都没被调用**
+- `TestChainBudgetAccumulates` —— 成功调用后预算累计消耗
+- `TestChainRecordsCost` —— 成本 == 价表单价 × token 数（关系断言，不写死数值）
+- `TestChainUnknownModelUnpriced` —— 未知模型记「未定价」，不记 0
+- `TestChainNonRetryableSkipsRetries` / `TestChainContextCancelNotBreaker` / `TestClassifyStatus` 等
+`GOWORK=off go test ./...` 全绿。
+## 文档
+- `port/port.go` 包文档：为什么需要、依赖面、**怎么选（窄接口 vs eino 原生）**
+- `README.md`：新增「窄接口层」章节 + 包表补 port
+- `AGENTS.md`：包清单补 port
+关联 issue oagentkit/llm#11
+
+### 修复(port)：去掉测试桩里没用上的 usage 字段（lint: field usage is unused）
+
+精确计量的覆盖走 WithTokenCounter 选项，桩里的 usage 字段没人用。
+
 ## [v0.13.1] — 2026-10-20
 
-- [round-1] fix(go): Go 地板降到 go 1.24.0，CI go-version 同步到 1.24 (#17)
+- [round-1] fix(go): Go 地板降到 go 1.24.0，CI go-version 同步到 1.24
 - [round-1] fix(deps): 依赖地板抬到发版前已发布的最新（textx v0.6.0 / oekit/pkg v0.17.0），并修 README 与 go.mod 矛盾
 
 ## [v0.13.0] — 2026-10-20
@@ -50,7 +117,7 @@ CostTracker.Record 要求调用方每次传入单价，llm 自己既不持有「
 
 ## [v0.12.1] — 2026-10-20
 
-### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反 (#7)
+### 修复(docs)：panic 机制归属修正为 oekit/concurrency/async，SetPanicHandler 结论与事实相反
 
 Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -73,7 +140,7 @@ github.com/oagentkit/llm/obsx。
 
 ## [v0.10.0] — 2026-10-19
 
-- 杂务(deps)：依赖地板对齐远端最新（obs v0.5.0 / textx v0.4.0 / concurrency v0.17.1 / pkg v0.15.1 / logx v0.7.1） (#13)
+- 杂务(deps)：依赖地板对齐远端最新（obs v0.5.0 / textx v0.4.0 / concurrency v0.17.1 / pkg v0.15.1 / logx v0.7.1）
 
 ## [v0.9.0] — 2026-10-19
 
@@ -181,10 +248,10 @@ go.mod 摘除 oekit/concurrency 之外对 runtime 的依赖（本仓不再引用
 门禁：go build / go vet / go test -race 全绿（含 TestResilientBreakerTrips 与
 TestResilientUserCancelDoesNotTripBreaker 两条熔断契约测试），gofmt 干净。
 
-- 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」 (#4)
-- 杂务(deps)：跟进最新 tag (#3)
-- 杂务(deps)：oekit 依赖升级 (#2)
-- 杂务(deps)：跨仓依赖升级 (#1)
+- 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」
+- 杂务(deps)：跟进最新 tag
+- 杂务(deps)：oekit 依赖升级
+- 杂务(deps)：跨仓依赖升级
 - 杂务(deps)：oekit/concurrency v0.6.0 -> v0.9.0
 
 - CI：接入 org 共享门禁（规则本体在 oagentkit/.github）
