@@ -18,8 +18,6 @@ type fakeCompleter struct {
 	err error
 	// out 成功时的返回文本。
 	out string
-	// usage 若非 nil，则作为精确计量回传（宿主有 provider usage 的形态）。
-	usage *Usage
 }
 
 func (f *fakeCompleter) Complete(ctx context.Context, req Request) (string, error) {
