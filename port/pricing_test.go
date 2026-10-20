@@ -3,7 +3,10 @@ package port
 import (
 	"errors"
 	"math"
+	"sync"
 	"testing"
+
+	"github.com/oekit/concurrency/async"
 )
 
 // ⚠️ 本文件的断言一律用**关系**（按价表查到的单价 × token 数 == 记录的成本），
@@ -269,3 +272,371 @@ func TestCostTrackerRecordPriced(t *testing.T) {
 // ---------- Provider 侧单价解析 ----------
 
 // priceProviderStub 最小 Provider 桩（只关心价格解析路径）。
+
+// ---------- 覆盖键归一化（issue #26） ----------
+
+// TestPriceTable_OverrideKeyNormalized_CoversBaseForm 覆盖键带**日期后缀**时，
+// 不带形态的查询也必须拿到**覆盖价**。
+//
+// 修复前：NewPriceTable 把覆盖键原样入库，只有同形态查询能命中；不带形态的
+// 查询会静默落到内建参考价（found=true / kind=exact，**没有任何信号**提示
+// 「这个价不是你配的」）。
+func TestPriceTable_OverrideKeyNormalized_CoversBaseForm(t *testing.T) {
+	const model = "mimo-v2.5-pro-20250101"
+	const base = "mimo-v2.5-pro"
+	override := Price{InputPerM: 9, OutputPerM: 9}
+
+	// 前置：内建参考价必须与覆盖价不同，否则本用例测不出东西
+	if builtin, _ := DefaultPriceTable().Lookup(base); builtin == override {
+		t.Fatal("内建参考价与覆盖价相同，本用例失去意义")
+	}
+
+	tbl := NewPriceTable(map[string]Price{model: override})
+
+	// 1) 同形态查询 → 覆盖价
+	got, lk := tbl.Lookup(model)
+	if !lk.Found() {
+		t.Fatalf("Lookup(%q) 应查到价", model)
+	}
+	if got != override {
+		t.Fatalf("Lookup(%q) 应是覆盖价: got=%v want=%v", model, got, override)
+	}
+	if lk.Kind != MatchExact || lk.Key != model {
+		t.Fatalf("Lookup(%q) 应是精确命中且 Key=%q，实际 kind=%v key=%q",
+			model, model, lk.Kind, lk.Key)
+	}
+
+	// 2) 不带形态的查询 → **也**是覆盖价（修复前这里是内建参考价）
+	got, lk = tbl.Lookup(base)
+	if !lk.Found() {
+		t.Fatalf("Lookup(%q) 应查到价", base)
+	}
+	if got != override {
+		t.Fatalf("Lookup(%q) 应是覆盖价而不是内建参考价: got=%v want=%v", base, got, override)
+	}
+	if lk.Kind != MatchNormalized {
+		t.Fatalf("Lookup(%q) 应是归一化命中，实际 %v", base, lk.Kind)
+	}
+	// Key 报出**调用方配的键**——「只认自己配的价」的消费者据此回查自己的表
+	if lk.Key != model {
+		t.Fatalf("Lookup(%q) 的 Key 应是调用方配的键 %q，实际 %q", base, model, lk.Key)
+	}
+}
+
+// TestPriceTable_OverrideKeyWithDeployPrefix_CoversBaseForm 覆盖键带**部署前缀**时，
+// 不带前缀的查询同样必须拿到覆盖价。
+func TestPriceTable_OverrideKeyWithDeployPrefix_CoversBaseForm(t *testing.T) {
+	const model = "openai/gpt-4o"
+	const base = "gpt-4o"
+	override := Price{InputPerM: 1, OutputPerM: 2}
+
+	if builtin, _ := DefaultPriceTable().Lookup(base); builtin == override {
+		t.Fatal("内建参考价与覆盖价相同，本用例失去意义")
+	}
+
+	tbl := NewPriceTable(map[string]Price{model: override})
+
+	got, lk := tbl.Lookup(model)
+	if !lk.Found() || got != override {
+		t.Fatalf("Lookup(%q) 应是覆盖价: got=%v want=%v found=%v", model, got, override, lk.Found())
+	}
+	if lk.Kind != MatchExact || lk.Key != model {
+		t.Fatalf("Lookup(%q) 应是精确命中且 Key=%q，实际 kind=%v key=%q",
+			model, model, lk.Kind, lk.Key)
+	}
+
+	got, lk = tbl.Lookup(base)
+	if !lk.Found() || got != override {
+		t.Fatalf("Lookup(%q) 应是覆盖价而不是内建参考价: got=%v want=%v found=%v",
+			base, got, override, lk.Found())
+	}
+	if lk.Kind != MatchNormalized {
+		t.Fatalf("Lookup(%q) 应是归一化命中，实际 %v", base, lk.Kind)
+	}
+	if lk.Key != model {
+		t.Fatalf("Lookup(%q) 的 Key 应是调用方配的键 %q，实际 %q", base, model, lk.Key)
+	}
+}
+
+// TestPriceTable_OverrideBaseForm_StillCoversDatedVariant 覆盖键是**基础形态**时，
+// 带形态的查询仍要命中它——这是文档原本就承诺的**正向**一例，不许回归。
+func TestPriceTable_OverrideBaseForm_StillCoversDatedVariant(t *testing.T) {
+	const base = "mimo-v2.5-pro"
+	const dated = "mimo-v2.5-pro-20250101"
+	override := Price{InputPerM: 9, OutputPerM: 9}
+
+	tbl := NewPriceTable(map[string]Price{base: override})
+
+	got, lk := tbl.Lookup(base)
+	if !lk.Found() || got != override {
+		t.Fatalf("Lookup(%q) 应是覆盖价: got=%v want=%v", base, got, override)
+	}
+	if lk.Kind != MatchExact || lk.Key != base {
+		t.Fatalf("Lookup(%q) 应是精确命中且 Key=%q，实际 kind=%v key=%q",
+			base, base, lk.Kind, lk.Key)
+	}
+
+	got, lk = tbl.Lookup(dated)
+	if !lk.Found() || got != override {
+		t.Fatalf("Lookup(%q) 应是覆盖价: got=%v want=%v", dated, got, override)
+	}
+	if lk.Kind != MatchNormalized || lk.Key != base {
+		t.Fatalf("Lookup(%q) 应是归一化命中且 Key=%q，实际 kind=%v key=%q",
+			dated, base, lk.Kind, lk.Key)
+	}
+}
+
+// TestPriceTable_BuiltinTableUnaffected 内建价表的行为**不许变**：带日期后缀的
+// 查法与主干查法拿到同一个价，命中方式分别是归一化 / 精确。
+func TestPriceTable_BuiltinTableUnaffected(t *testing.T) {
+	tbl := DefaultPriceTable()
+	const base = "gpt-4o"
+	const dated = "gpt-4o-2024-08-06"
+
+	basePrice, baseLk := tbl.Lookup(base)
+	if !baseLk.Found() {
+		t.Fatalf("内建表应有 %q", base)
+	}
+	if baseLk.Kind != MatchExact || baseLk.Key != base {
+		t.Fatalf("Lookup(%q) 应是精确命中且 Key=%q，实际 kind=%v key=%q",
+			base, base, baseLk.Kind, baseLk.Key)
+	}
+
+	datedPrice, datedLk := tbl.Lookup(dated)
+	if !datedLk.Found() {
+		t.Fatalf("内建表应能查到 %q", dated)
+	}
+	if datedLk.Kind != MatchNormalized || datedLk.Key != base {
+		t.Fatalf("Lookup(%q) 应是归一化命中且 Key=%q，实际 kind=%v key=%q",
+			dated, base, datedLk.Kind, datedLk.Key)
+	}
+	// 关系断言（不写死价目表数值——价目表随厂商调价变动）
+	if datedPrice != basePrice {
+		t.Fatalf("带后缀查询与主干查询的价应一致: dated=%v base=%v", datedPrice, basePrice)
+	}
+}
+
+// TestPriceTable_OverrideKeyPriority_Rules 同一基座上的多个覆盖键按**固定的
+// 优先级规则**只留一个生效（规则见 NewPriceTable 的 godoc）：
+//
+//  1. 基础形态的键优先；
+//  2. 同为派生形态时更长的键优先；
+//  3. 再同则字典序小的键优先。
+//
+// 反复构造价表（map 的迭代顺序随机）——结果必须恒定，否则同一份配置在不同
+// 进程里会算出不同的价。
+func TestPriceTable_OverrideKeyPriority_Rules(t *testing.T) {
+	cases := []struct {
+		name      string
+		overrides map[string]Price
+		wantKey   string
+	}{
+		{
+			"基础形态优先于部署前缀形态",
+			map[string]Price{"gpt-4o": {1, 2}, "openai/gpt-4o": {3, 4}},
+			"gpt-4o",
+		},
+		{
+			"基础形态优先于日期后缀形态",
+			map[string]Price{"gpt-4o": {1, 2}, "gpt-4o-2024-08-06": {3, 4}},
+			"gpt-4o",
+		},
+		{
+			"同为派生形态时更长的键优先（日期后缀）",
+			map[string]Price{"gpt-4o-20250101": {1, 2}, "gpt-4o-2024-08-06": {3, 4}},
+			"gpt-4o-2024-08-06",
+		},
+		{
+			"同为派生形态时更长的键优先（部署前缀）",
+			map[string]Price{"azure/gpt-4o": {1, 2}, "openai/gpt-4o": {3, 4}},
+			"openai/gpt-4o",
+		},
+		{
+			"等长时字典序小的优先",
+			map[string]Price{"gpt-4o-20250101": {1, 2}, "gpt-4o-20240101": {3, 4}},
+			"gpt-4o-20240101",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for i := 0; i < 100; i++ {
+				tbl := NewPriceTable(c.overrides)
+				_, lk := tbl.Lookup("gpt-4o")
+				if !lk.Found() {
+					t.Fatal("应查到价")
+				}
+				if lk.Key != c.wantKey {
+					t.Fatalf("生效的键应是 %q，实际 %q", c.wantKey, lk.Key)
+				}
+			}
+		})
+	}
+}
+
+// TestPriceTable_OverrideKeyPriority_OnePricePerFamily 同族只有一个价：落选的
+// 覆盖键**整族不生效**（不是只在自己那条查询上落选）。
+func TestPriceTable_OverrideKeyPriority_OnePricePerFamily(t *testing.T) {
+	tbl := NewPriceTable(map[string]Price{
+		"gpt-4o":        {InputPerM: 1, OutputPerM: 2},
+		"openai/gpt-4o": {InputPerM: 3, OutputPerM: 4},
+	})
+	base, baseLk := tbl.Lookup("gpt-4o")
+	pref, prefLk := tbl.Lookup("openai/gpt-4o")
+	if base != pref {
+		t.Fatalf("同族应只有一个价: base=%v prefixed=%v", base, pref)
+	}
+	if baseLk.Key != prefLk.Key {
+		t.Fatalf("同族查询应归到同一个键: %q vs %q", baseLk.Key, prefLk.Key)
+	}
+	if base != (Price{InputPerM: 1, OutputPerM: 2}) {
+		t.Fatalf("应是基础形态键的价生效: got=%v", base)
+	}
+}
+
+// TestOverridePriority_IsStrictTotalOrder 优先级比较必须是**全序**：任意两个
+// 不同的键都能分出先后，且结论只取决于键本身（与 map 迭代顺序、与进程都无关）。
+// 这是「同一基座上谁的覆盖生效」跨进程稳定的前提。
+func TestOverridePriority_IsStrictTotalOrder(t *testing.T) {
+	keys := []string{
+		"gpt-4o", "openai/gpt-4o", "azure/gpt-4o",
+		"gpt-4o-2024-08-06", "gpt-4o-20250101",
+	}
+	for _, a := range keys {
+		for _, b := range keys {
+			if a == b {
+				if got := overridePriority(a, b); got != 0 {
+					t.Fatalf("overridePriority(%q,%q) 应为 0，实际 %d", a, b, got)
+				}
+				continue
+			}
+			ab, ba := overridePriority(a, b), overridePriority(b, a)
+			if ab == 0 {
+				t.Fatalf("overridePriority(%q,%q) 不该为 0（分不出先后）", a, b)
+			}
+			if (ab < 0) != (ba > 0) {
+				t.Fatalf("overridePriority 不反对称: (%q,%q)=%d 反向=%d", a, b, ab, ba)
+			}
+		}
+	}
+}
+
+// TestPriceTable_WithOverride_UsesSameNormalization WithOverride 必须与
+// NewPriceTable 走**同一套**归一化规则：带形态的覆盖键也要盖住基础形态的查询。
+func TestPriceTable_WithOverride_UsesSameNormalization(t *testing.T) {
+	const model = "mimo-v2.5-pro-20250101"
+	const base = "mimo-v2.5-pro"
+	override := Price{InputPerM: 9, OutputPerM: 9}
+
+	tbl := DefaultPriceTable().WithOverride(model, override)
+
+	got, lk := tbl.Lookup(base)
+	if !lk.Found() || got != override {
+		t.Fatalf("WithOverride 后 Lookup(%q) 应是覆盖价: got=%v want=%v found=%v",
+			base, got, override, lk.Found())
+	}
+	if lk.Kind != MatchNormalized || lk.Key != model {
+		t.Fatalf("Lookup(%q) 应是归一化命中且 Key=%q，实际 kind=%v key=%q",
+			base, model, lk.Kind, lk.Key)
+	}
+	// 原表不动
+	if p, _ := DefaultPriceTable().Lookup(base); p == override {
+		t.Fatal("WithOverride 不得改动原表")
+	}
+
+	// 基础形态的覆盖键同样盖住带形态的查询
+	tbl2 := DefaultPriceTable().WithOverride(base, override)
+	got, lk = tbl2.Lookup(model)
+	if !lk.Found() || got != override {
+		t.Fatalf("WithOverride 后 Lookup(%q) 应是覆盖价: got=%v want=%v", model, got, override)
+	}
+	if lk.Kind != MatchNormalized || lk.Key != base {
+		t.Fatalf("Lookup(%q) 应是归一化命中且 Key=%q，实际 kind=%v key=%q",
+			model, base, lk.Kind, lk.Key)
+	}
+}
+
+// TestPriceTable_OverrideDoesNotShadowSiblingModels 覆盖一个模型族**不得**遮蔽
+// 内建表里**其它**模型的价——归一化只去部署前缀与日期后缀，
+// `gpt-4o-mini-2024-08-06` 折出来是 `gpt-4o-mini` 而不是 `gpt-4o`。
+func TestPriceTable_OverrideDoesNotShadowSiblingModels(t *testing.T) {
+	override := Price{InputPerM: 1, OutputPerM: 2}
+	tbl := NewPriceTable(map[string]Price{"gpt-4o-2024-08-06": override})
+
+	for _, sibling := range []string{"gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"} {
+		want, wlk := DefaultPriceTable().Lookup(sibling)
+		if !wlk.Found() {
+			t.Fatalf("内建表应收录 %q", sibling)
+		}
+		got, lk := tbl.Lookup(sibling)
+		if !lk.Found() {
+			t.Fatalf("%q 应能查到价", sibling)
+		}
+		if got != want {
+			t.Fatalf("%q 的价不该被别的覆盖遮蔽: got=%v want=%v", sibling, got, want)
+		}
+	}
+
+	// 被覆盖的那一族确实换成了覆盖价
+	got, lk := tbl.Lookup("gpt-4o")
+	if !lk.Found() || got != override {
+		t.Fatalf("gpt-4o 族应是覆盖价: got=%v", got)
+	}
+	if lk.Key != "gpt-4o-2024-08-06" {
+		t.Fatalf("Key 应报出调用方配的键，实际 %q", lk.Key)
+	}
+}
+
+// TestBuiltinPricingKeysAreBaseForms 内建价表的每个键都必须是**基座形态**
+// （无部署前缀 / 日期后缀）——否则它自己的基座折算会落到另一个键上，
+// 覆盖价就能意外遮蔽它。
+func TestBuiltinPricingKeysAreBaseForms(t *testing.T) {
+	for k := range builtinPricing {
+		if base := baseForm(k); base != k {
+			t.Fatalf("内建键 %q 的基座形态是 %q，应相同（否则覆盖价会遮蔽它）", k, base)
+		}
+	}
+}
+
+// TestPriceTable_LookupKeyIsIdempotent PriceLookup.Key 是**查回同一份价**用的键
+// （PriceLookup 的 godoc 承诺了这条不变量）：再查一次它，必须拿到同一个价。
+func TestPriceTable_LookupKeyIsIdempotent(t *testing.T) {
+	tbl := NewPriceTable(map[string]Price{
+		"mimo-v2.5-pro-20250101": {InputPerM: 9, OutputPerM: 9},
+		"openai/gpt-4o":          {InputPerM: 1, OutputPerM: 2},
+	})
+	for _, model := range []string{
+		"mimo-v2.5-pro", "mimo-v2.5-pro-20250101",
+		"gpt-4o", "openai/gpt-4o",
+	} {
+		p, lk := tbl.Lookup(model)
+		if !lk.Found() {
+			t.Fatalf("Lookup(%q) 应查到价", model)
+		}
+		p2, lk2 := tbl.Lookup(lk.Key)
+		if !lk2.Found() || p2 != p {
+			t.Fatalf("Lookup(%q) 的 Key=%q 再查应拿到同一个价: %v vs %v", model, lk.Key, p2, p)
+		}
+	}
+}
+
+// TestPriceTable_LookupConcurrent 价表构造后只读，多 goroutine 并发查价必须
+// 无 race（配合 -race 跑）。
+func TestPriceTable_LookupConcurrent(t *testing.T) {
+	override := Price{InputPerM: 9, OutputPerM: 9}
+	tbl := NewPriceTable(map[string]Price{"mimo-v2.5-pro-20250101": override})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		async.GoSafe(func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if p, lk := tbl.Lookup("mimo-v2.5-pro"); !lk.Found() || p != override {
+					t.Errorf("并发查价结果不对: price=%v lookup=%v", p, lk)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+}

@@ -42,6 +42,10 @@ var ErrPriceUnknown = port.ErrPriceUnknown
 func DefaultPriceTable() *PriceTable { return port.DefaultPriceTable() }
 
 // NewPriceTable 造一份价表：内建价 + overrides 覆盖。
+//
+// 覆盖键与内建表走**同一套归一化规则**（折算成基座形态再入库），所以覆盖
+// `mimo-v2.5-pro` 与覆盖 `mimo-v2.5-pro-20250101` 是等价的——同一基座上的
+// 多个覆盖键按固定的优先级规则只留一个生效（详见 port.NewPriceTable 的文档）。
 func NewPriceTable(overrides map[string]Price) *PriceTable { return port.NewPriceTable(overrides) }
 
 // LookupPrice 用内建价表查价。
