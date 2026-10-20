@@ -10,6 +10,7 @@ go get github.com/oagentkit/llm
 |---|---|
 | `obsx` | eino callbacks 体系的 LLM 调用追踪 + token 用量采集 + 分阶段打标（自 `obs/obsx` 迁入 v0.12.0） |
 | `llm` | 模型客户端：多模型降级链、任务级预算、成本记账、分阶段路由、主备切换 |
+| `port` | **窄接口层**（不依赖 eino）：`Complete(ctx, req) (string, error)` 形态的降级链 / 预算 / 成本记账 |
 | `wrap` | 调用包装与限流适配 |
 | `llmtest` | 模型层契约测试套件 |
 
@@ -19,6 +20,44 @@ go get github.com/oagentkit/llm
 
 - 本仓依赖的矩阵内仓：`textx`。
   （`obsx` 已于 v0.12.0 从 `obs/obsx` 迁入本仓，`obs` 不再是外部依赖。）
+
+## 窄接口层（`port`）：不引 eino 的那一半
+
+本仓的对外能力原先都长在 eino 的类型上（`model.BaseChatModel` / `schema.Message`）。
+非 eino 生态的宿主想接一个**单方法**窄接口时，只能自己重写：拼请求体、解析响应、
+判错误码、算超时——代价不只是代码量，还有**边界易错**（HTTP 状态码判错就静默把失败当成功）。
+
+`port` 包把这些收在一处，**不引入 eino**（`go list -deps ./port` 可验证）：
+
+```go
+// 宿主实现一个方法即可接进本仓的降级链
+type Completer interface {
+    Complete(ctx context.Context, req port.Request) (string, error)
+}
+
+chain := port.NewChain(
+    port.WithCompleter("gpt-4o", myCompleter),   // 先注册者优先
+    port.WithCompleter("deepseek-chat", backup),  // 失败切下一环
+    port.WithBudget(port.NewBudget(100000)),     // 预算耗尽 → 调用前拦下
+    port.WithTracker(port.NewCostTracker()),     // 按价表计价并记账
+)
+out, err := chain.Complete(ctx, port.Request{Prompt: "…", Stage: "R1"})
+```
+
+**降级链 / 任务级预算 / 成本记账在窄接口路径上真的生效**（不是只把请求转发出去）：
+预算判定在**调用前**（事后扣减等于没有预算）、失败按错误分类重试或切链、
+成本按内建价表记账（价表未收录的模型记为「未定价」，**不记 0**）。
+本包还提供 `ClassifyStatus`（按 HTTP 状态码判可重试），免得每个宿主各写一遍、各判错一遍。
+
+### 怎么选
+
+| 场景 | 用哪条路径 |
+|---|---|
+| 已在 eino 生态：要 ToolCall / 多模态 / 流式 / JSON 解析进 struct | 根包 `llm.NewClient` / `llm.NewResilient`（能力更全） |
+| 不在 eino 生态：只要「一句话进、一句话出」，或不想把 eino 带进依赖图 | `port` 包：宿主实现 `Completer`，本包管降级/预算/成本 |
+
+两条路径**共用同一份**预算 / 成本 / 价表实现（`llm.CostTracker` 与 `port.CostTracker`
+是**同一个类型**），不会出现两套算账。
 
 ## 外部依赖地板
 
