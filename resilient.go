@@ -367,13 +367,13 @@ func (r *Resilient) stepChain(ctx context.Context, stage string, p Provider, idx
 		return false, nil, false, fmt.Errorf("llm: %s 任务 token 预算已耗尽（%d）", stage, r.Budget.Used())
 	}
 	// 熔断中的模型直接跳过（不记录为 attempt——没真正尝试）
-	gen, ok := r.breakers.allow(ctx, p.ModelName())
+	gen, ok := r.breakers.Allow(ctx, p.ModelName())
 	if !ok {
 		return false, nil, true, nil
 	}
 	// nil model 防御：Allow 已放行（可能占用半开探测配额），必须配对 Failure
 	if isNilModel(p.Model()) {
-		r.breakers.failure(ctx, p.ModelName(), gen)
+		r.breakers.Failure(ctx, p.ModelName(), gen)
 		return false, &Attempt{Provider: p.Name(), Model: p.ModelName(), Err: fmt.Errorf("provider.Model() 为 nil")}, false, nil
 	}
 	done, att = r.tryProvider(ctx, stage, p, idx, gen, try)
@@ -404,18 +404,18 @@ func (r *Resilient) tryProvider(ctx context.Context, stage string, p Provider, i
 	start := time.Now()
 	err := try(p)
 	if err == nil {
-		r.breakers.success(p.ModelName(), gen)
+		r.breakers.Success(p.ModelName(), gen)
 		r.rememberModel(p.ModelName())
 		return true, nil
 	}
 	if ctx.Err() != nil {
 		// 用户主动中止：结果未知，走 Abandon（解除半开探测占位、不计失败
 		// 统计——Failure 曾让连续 3 次用户取消把模型熔断 5 分钟）
-		r.breakers.abandon(p.ModelName(), gen)
+		r.breakers.Abandon(p.ModelName(), gen)
 		return false, nil
 	}
 	// 真实模型失败：配对 Failure（含半开探测占位的解除）
-	r.breakers.failure(ctx, p.ModelName(), gen)
+	r.breakers.Failure(ctx, p.ModelName(), gen)
 	att = &Attempt{
 		Provider: p.Name(), Model: p.ModelName(),
 		Err: err, Duration: time.Since(start),

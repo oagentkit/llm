@@ -28,13 +28,6 @@ import (
 	"github.com/oekit/pkg/mathx"
 )
 
-// TokenAccountant token 记账接口（调用方可接预算累计器或 Prometheus）。
-type TokenAccountant interface {
-	Add(n int)
-	Used() int
-	Remaining() int
-}
-
 // Client LLM 客户端（带重试、限速、预算、fitInput）。
 type Client struct {
 	Model     model.BaseChatModel
