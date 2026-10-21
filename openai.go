@@ -33,7 +33,29 @@ type OpenAIProviderConfig struct {
 	// CaptureRetryAfter 捕获 429 响应的 Retry-After 头（批次四十五，对标 ZCode
 	// runner-retry 的服务端退避建议）：经 ctx sink 透出给重试环的退避取舍。
 	// 需要 http.Client 注入（Timeout 语义由注入的 Client 自带保留）。
-	CaptureRetryAfter   bool
+	CaptureRetryAfter bool
+	// HTTPClient 注入自定义 HTTP 客户端（**可选**，nil = 走缺省）。
+	//
+	// 为什么需要：出站守卫要真正闭合「写面校验 → 拨号」的 DNS rebinding 窗口，
+	// 守卫必须挂在 Transport.DialContext 上——写面校验（按 URL 判）拦不住
+	// 「解析与拨号之间权威 DNS 改口」。而 LLM 的 base_url 是**用户可配**的
+	// （平台代发 LLM 请求的目标），是这条链上暴露最大的一个面。
+	//
+	// 语义：**显式注入优先于内部构造**。注入后由注入的 Client 完全接管超时
+	// （Timeout 语义由注入的 Client 自带保留；eino 侧同一口径——设了 HTTPClient
+	// 就不再用 config.Timeout），本仓不再叠加自己的 Timeout。
+	// 注入的 Client 的 Transport 为 nil 时由 net/http 回落 http.DefaultTransport。
+	//
+	// 与 CaptureRetryAfter 可叠加：注入的同时要捕获 Retry-After 时，本仓在
+	// **注入的 Transport 外面**套一层 RetryAfterTransport——守卫与退避建议
+	// 捕获不再互相排斥（此前二者是排斥关系：自建 client 走 http.DefaultTransport，
+	// 宿主的守卫挂不上去）。
+	//
+	// 宿主侧参考（agent-harness 的 netguard）：
+	//
+	//	hc, err := netguard.NewClient(nil, netguard.Allow{Private: true, Loopback: true})
+	//	cfg.HTTPClient = hc   // hc.Transport 挂了 netguard.DialFunc
+	HTTPClient          *http.Client
 	CostPer1KPrompt     float64 // 每 1000 prompt token 成本（美元）
 	CostPer1KCompletion float64 // 每 1000 completion token 成本（美元）
 }
@@ -75,16 +97,31 @@ func (c *OpenAIProviderConfig) fillDefaults() {
 	}
 }
 
-// httpClient 需要捕获 Retry-After 时注入带 retryAfterTransport 的 Client
-// （Timeout 语义由注入的 Client 自带保留）；否则走 openai 包内部缺省。
+// httpClient 决定注入给下游的 http.Client。
+//
+// 三条路径：
+//   - **宿主注入了 HTTPClient**：以其为准（Timeout 语义由注入的 Client 自带保留）。
+//     若同时要 CaptureRetryAfter，则在注入的 Transport 外面套一层
+//     RetryAfterTransport——两条路径合流，守卫与 Retry-After 捕获不再互相排斥。
+//     派生时**复制**一份 Client，不改动宿主传进来的那个（宿主可能还在用它）。
+//   - 宿主没注入且要捕获 Retry-After：自建 client（既有行为，逐字不变）。
+//   - 宿主没注入且不捕获：返回 nil——走 openai 包内部缺省（既有行为）。
 func (c *OpenAIProviderConfig) httpClient() *http.Client {
+	if c.HTTPClient == nil {
+		if !c.CaptureRetryAfter {
+			return nil
+		}
+		return &http.Client{
+			Timeout:   c.Timeout,
+			Transport: httpjson.RetryAfterTransport{Base: http.DefaultTransport},
+		}
+	}
 	if !c.CaptureRetryAfter {
-		return nil
+		return c.HTTPClient
 	}
-	return &http.Client{
-		Timeout:   c.Timeout,
-		Transport: httpjson.RetryAfterTransport{Base: http.DefaultTransport},
-	}
+	derived := *c.HTTPClient
+	derived.Transport = httpjson.RetryAfterTransport{Base: c.HTTPClient.Transport}
+	return &derived
 }
 
 // chatModelConfig 组装 eino openai.ChatModelConfig（maxTokens 指针化）。
