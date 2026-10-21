@@ -2,6 +2,10 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.15.1] — 2026-10-21
+
+- 与 v0.15.0 相比无代码差异（版本号/打包变更）
+
 ## [v0.15.0] — 2026-10-21
 
 ### 新增(openai)：OpenAIProviderConfig 支持注入 HTTPClient——宿主的拨号层守卫接得上
@@ -75,6 +79,19 @@ golangci-lint       ✅ 0 issues
 本 PR 把声明与手写文档里那一行一起改对，与生成器（`gen_docs.py` 的
 `dep_line`）的输出格式保持一致。矩阵源侧的修正在
 oagentkit/matrix-tools 的对应 PR 里。
+
+- 文档(AGENTS)：补「发版顺序」小节，指向 org CONTRIBUTING 单一副本
+
+13 个业务仓的 AGENTS.md 此前对发版顺序零覆盖（只有 textx 有个
+「### 版本与发版」标题，但里面只讲 SemVer 与 module 路径），
+发版顺序只写在 org 规则仓的 .github/CONTRIBUTING.md 里，单仓读者看不到。
+本次只加**指针 + 本仓相关提醒**，runbook 本体保持**单一副本**
+（CONTRIBUTING §发版），避免 13 份副本各自漂移。
+覆盖四条：
+- CHANGELOG.md 由 matrix-tools/scripts/gen_changelogs.py 从 git 历史生成，不要手改
+- tag 必须落在 CHANGELOG 提交之后（下游 go get 拿到的是 tag 快照）
+- 警告：无参重生成会吞掉待发版段，--next-version 是唯一能产出待发版段的开关
+- 本仓相关提醒（见正文）
 
 
 ## [v0.14.2] — 2026-10-20
