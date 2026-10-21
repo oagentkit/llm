@@ -2,6 +2,81 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.15.0] — 2026-10-21
+
+### 新增(openai)：OpenAIProviderConfig 支持注入 HTTPClient——宿主的拨号层守卫接得上
+
+## 下游要做什么
+**什么都不用做**——纯增量：字段缺省为 nil 时行为**逐字不变**，现有调用方不需要改。
+想给 LLM 出站挂守卫的宿主，改一行：
+```go
+hc, err := netguard.NewClient(nil, netguard.Allow{Private: true, Loopback: true})
+cfg.HTTPClient = hc   // hc.Transport 挂了 netguard.DialFunc
+```
+（`netguard` 在 agent-harness 仓；这里是说明接线形态，本仓不依赖它。）
+## 缺口
+`OpenAIProviderConfig` 没有 `HTTPClient` 字段，宿主**无法**把自己构造的
+`http.Client` 注入 LLM 请求链路。而宿主的出站有一条硬要求：**拨号层必须挂守卫**。
+写面校验（按 URL 判）拦不住 DNS rebinding——两次解析之间权威 DNS 可以改口：
+```
+写面校验：evil.example → 1.2.3.4        （公网，放行）
+实际请求：evil.example → 169.254.169.254 （元数据段，已不在判定面内）
+```
+要闭合它，守卫必须挂在 `Transport.DialContext` 上，这要求宿主能提供
+**自己的 `*http.Transport`**（或整个 `*http.Client`）。而 LLM 档案的
+`base_url` 是**用户可配**的（平台代发 LLM 请求的目标），是这条链上暴露最大的面。
+## 语义：显式注入优先于内部构造
+| 宿主注入 | 捕获 Retry-After | 行为 |
+|---|---|---|
+| 否 | 否 | 返回 nil——走 openai 包内部缺省（**既有行为逐字不变**）|
+| 否 | 是 | 自建 client（**既有行为逐字不变**）|
+| 是 | 否 | 原样使用宿主注入的 client |
+| 是 | 是 | **在宿主注入的 Transport 外面**套一层 `RetryAfterTransport` |
+最后一行是此前**做不到**的组合：自建 client 走的是 `http.DefaultTransport`，
+宿主的守卫挂不上去——`CaptureRetryAfter` 与自定义守卫此前是**互相排斥**的。
+现在两条路径合流。
+派生时**复制**一份 client，不就地改写宿主传进来的那个（宿主可能还在用它）。
+超时语义：注入后由注入的 Client 完全接管，本仓不再叠加自己的 Timeout
+（eino 侧同一口径——设了 `HTTPClient` 就不再用 `config.Timeout`）。
+## 测试
+- 四条路径的取舍，逐条断言（含「不改宿主 client」）；
+- **端到端**：httptest + 计数型 Transport，断言注入的 Client 真的承担了出站
+  请求——注入点装在 config 上，中间隔着 fillDefaults → httpClient →
+  chatModelConfig → eino NewChatModel 四跳，任何一跳把它丢了，单测全绿而
+  **守卫根本没挂上**（宿主以为出站有保护，实际裸奔）。
+- **反向验证**：把实现改成「看不见注入」，端到端用例变红并点名
+  「注入的 Client 没被使用——出站请求没走宿主的 Transport」。
+## 顺带抬的地板
+```
+oekit/pkg        v0.18.0 → v0.20.0
+oekit/concurrency v0.18.0 → v0.19.0
+```
+对本仓**零行为差异**：本仓只 import `concurrency/async` 与 `concurrency/breaker`，
+这两个包在 v0.18.0→v0.19.0 之间**一字未动**（改动在 `retry` 与 `syncx`，
+本仓不 import）；`oekit/pkg` 的变更见 agent-harness v0.8.2 段（纯增量 +
+一处退避溢出修复）。
+## 门禁
+```
+go vet ./...        ✅
+go test -race ./... ✅（5 包全绿）
+gofmt -l .          ✅ 空
+golangci-lint       ✅ 0 issues
+```
+
+- 文档：修正陈旧的矩阵内依赖声明
+
+本仓的矩阵内依赖实际只有 `textx`（go.mod 只 require 它，代码也只 import 它）。
+`obs` 与 `runtime` 是**陈旧声明**——它们曾被依赖（`obsx` 迁入本仓、`breaker` 委托
+`oekit/concurrency` 之后就不再引用了），但 `modules.json` 的 `dependsOn` 一直没跟上。
+现在有一条机器门禁专门对账这件事（`matrix-tools/scripts/verify_import_direction.py`：
+真实 import ⊆ 声明），它把本仓标成了「声明陈旧」。
+声明与事实不一致的代价：所有以声明图为输入的门禁（依赖闭包、层级校验）
+都在一张漂了的图上做校验；矩阵的机器可读源也对外播着一个不存在的依赖。
+本 PR 把声明与手写文档里那一行一起改对，与生成器（`gen_docs.py` 的
+`dep_line`）的输出格式保持一致。矩阵源侧的修正在
+oagentkit/matrix-tools 的对应 PR 里。
+
+
 ## [v0.14.2] — 2026-10-20
 
 ### 修复(pricing)：覆盖键归一化——调用方显式配的单价不再被内建参考价顶掉
