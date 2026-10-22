@@ -2,6 +2,48 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.16.0] — 2026-10-23
+
+### 新增(decision)：System One 协议客户端（非自回归判定模型）
+
+本仓此前只覆盖**自回归 chat 模型**（降级链/预算/成本/分阶段路由/主备）。另一族
+**非自回归判定模型**（System One 协议：Jev 托管、Laya 自托管、Kev、Clef、CLM）形态
+完全不同——没有 messages 概念、不生成散文、只做三原语判定（`choice` 选候选 /
+`score` 打有序档位 / `noul` 是否），输出**有限标签 + 概率分布 + 校准置信度**，
+一条状态一次前向 pass 答完全部问题。它进不了 chat 那套形状，故单独立包
+`decision`（import 路径 `github.com/oagentkit/llm/decision`）。
+
+* 协议：`POST {base}/v1/systemone`，`Authorization: Bearer`。**Jev（托管）与 Laya
+  （自托管）同协议同载荷**（Laya 官方明言 answer payload 与 Jev schema-identical）
+  ⇒ 换端点即换模型，本包只实现一套协议。
+* **置信口径由本包单源**（`Answer.EffectiveConfidence`）：真机实测两个后端的
+  `confidence` 给法不一致（Laya 的 choice 用自有公式 0.9013、另给
+  `x_jev_confidence` 0.9712；Laya 的 noul 直接给 `p` 0.8125，Jev 口径是
+  `|2p−1|` 0.625）——两端各自自洽、都不报错，但**同一门槛在两端含义漂移**。
+  故一律按 Jev 公开公式从概率分布**本地算**：choice `(N·p_top−1)/(N−1)`、
+  score `max(0,1−Σpᵢ|i−m|/MAD)`、noul `|2p−1|`；分布缺失才回落端点值。
+  本地算法与 Laya 的 `x_jev_confidence` **逐位一致**（实测 0.9712 / 0.6769）
+  ⇒ 公式被后端实现交叉验证过，不是纸上推导。
+  口径随候选集规模变化（N=20 时 0.5 门槛 ≈ p_top>52.5%）⇒ 门槛须随候选集标定。
+* `legend` 以**真机**为准是对象（官方文档样例写数组，真机返回对象，数组形态解析
+  直接失败）；后端专有字段（`answer_confidence`/`x_jev_confidence`/`action`）解析并
+  保留——`x_jev_confidence` 正好可作本地口径的**对拍基准**。
+* **不吞错**：端点不可达/超时/非 2xx 一律返错（回落是调用方的义务）。
+* `BQ_DECISION_MOCK=1` mock 模式：不发网络请求、本地合成答案——**验接线不验质量**
+  （质量由 `decision_live` 真机用例背书）。
+* `Warmup`：端点首启要加载检查点（实测数十秒~数分钟），不预热则**首个真实请求
+  必然撞超时** ⇒ 表现为「配了但行为一点没变」的静默假生效；预热尽力而为、不阻塞启动。
+
+取舍：
+* 不放进根包 `llm`：它不是 chat 模型，接不进降级链/预算/成本的形状（那些按
+  token/chat 计），单立子包最省事。
+* 口径**自己算**而不直接用端点字段：牺牲一点「跟随后端改进」的便利，换两端同义
+  —— 同一门槛在 Jev 与 Laya 上含义一致，是「门槛可标定、可移植」的前提。
+
+门禁：gofmt -l（空）/ go vet / go build ./... / go test -race -count=1 ./decision/ 全过；
+真机验收用例在 `decision/decision_live_test.go`（build tag `decision_live`），
+可复跑：`BQ_DECISION_LIVE=1 BQ_DECISION_BASE_URL=<端点> go test -tags decision_live ./decision/`。
+
 ## [v0.15.2] — 2026-10-21
 
 - 杂务(deps)：依赖地板跟到 textx v0.6.2
