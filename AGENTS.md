@@ -12,6 +12,8 @@
 `port/`  ← 窄接口层（**不引 eino**）：Complete(ctx, req) (string, error) 形态的
            降级链 / 任务级预算 / 成本记账；预算与成本内核由根包下沉而来，
            两条路径共用同一份实现（llm.CostTracker == port.CostTracker）
+`decision/` ← **判定面客户端**：System One 协议的非自回归判定模型（Jev/Laya/Kev/
+           Clef…）——三原语 choice/score/noul + 校准置信口径（本地算）
 `wrap/`
 `llmtest/`
 ```

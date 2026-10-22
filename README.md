@@ -11,6 +11,7 @@ go get github.com/oagentkit/llm
 | `obsx` | eino callbacks 体系的 LLM 调用追踪 + token 用量采集 + 分阶段打标（自 `obs/obsx` 迁入 v0.12.0） |
 | `llm` | 模型客户端：多模型降级链、任务级预算、成本记账、分阶段路由、主备切换 |
 | `port` | **窄接口层**（不依赖 eino）：`Complete(ctx, req) (string, error)` 形态的降级链 / 预算 / 成本记账 |
+| `decision` | **判定面客户端**（非自回归判定模型，System One 协议：Jev/Laya/Kev/Clef…）：choice/score/noul 三原语 + 校准置信口径（本地算，两端同义） + mock/预热 |
 | `wrap` | 调用包装与限流适配 |
 | `llmtest` | 模型层契约测试套件 |
 

@@ -2,6 +2,33 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.16.0] — 2026-10-23
+
+### 新增(decision)：新增 System One 协议客户端（非自回归判定模型）
+
+本仓此前只覆盖自回归 chat 模型（降级链/预算/成本/分阶段路由/主备）。另一族
+非自回归判定模型（System One 协议：Jev 托管、Laya 自托管、Kev、Clef、CLM）形态
+完全不同：没有 messages 概念、不生成散文、只做三原语判定（choice 选候选 /
+score 打有序档位 / noul 是否），输出有限标签 + 概率分布 + 校准置信度，一条状态
+一次前向 pass 答完全部问题。它进不了 chat 那套形状，故单独立包 decision。
+- 协议：POST {base}/v1/systemone，Authorization: Bearer。Jev（托管）与 Laya
+  （自托管）同协议同载荷 ⇒ 换端点即换模型，本包只实现一套协议。
+- 置信口径由本包单源（Answer.EffectiveConfidence）：真机实测两后端的 confidence
+  给法不一致（Laya choice 自有公式 0.9013 + 另给 x_jev_confidence 0.9712；
+  Laya noul 直接给 p 0.8125，Jev 口径是 |2p−1| 0.625）——两端各自自洽、都不报错，
+  但同一门槛在两端含义漂移。故按 Jev 公开公式从概率分布本地算（choice
+  (N·p_top−1)/(N−1)、score max(0,1−Σpᵢ|i−m|/MAD)、noul |2p−1|），分布缺失才
+  回落端点值。本地算法与 Laya 的 x_jev_confidence 逐位一致（实测 0.9712/0.6769）
+  ⇒ 公式被后端实现交叉验证过。
+- legend 以真机为准是对象（官方文档样例写数组，真机返回对象，数组形态解析直接
+  失败）；后端专有字段 answer_confidence/x_jev_confidence/action 解析并保留。
+- 不吞错：端点不可达/超时/非 2xx 一律返错（回落是调用方的义务）。
+- BQ_DECISION_MOCK=1 mock 模式（验接线不验质量）；Warmup 预热（端点首启加载
+  检查点实测数十秒~数分钟，不预热则首个真实请求必然撞超时 ⇒ 静默假生效）。
+门禁：gofmt -l（空）/ go vet / go build ./... / go test -race -count=1 ./decision/ 全过；
+真机用例在 decision/decision_live_test.go（build tag decision_live），可复跑。
+
+
 ## [v0.15.2] — 2026-10-21
 
 - 杂务(deps)：依赖地板跟到 textx v0.6.2
