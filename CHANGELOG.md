@@ -28,6 +28,15 @@ score 打有序档位 / noul 是否），输出有限标签 + 概率分布 + 校
 门禁：gofmt -l（空）/ go vet / go build ./... / go test -race -count=1 ./decision/ 全过；
 真机用例在 decision/decision_live_test.go（build tag decision_live），可复跑。
 
+- 杂务(deps)：依赖地板跟到发版时刻的最新——oekit/concurrency v0.20.1、oekit/pkg v0.22.0
+
+打 tag 时刻的依赖地板必须是当时的最新（release.py doctor 对本仓判红 2：
+concurrency 钉在 v0.19.0 而远端最新 v0.20.1；pkg 钉在 v0.20.0 而远端最新 v0.22.0）。
+⚠️ 地板抬高对下游是**隐式破坏性变更**：不跑 `go mod tidy` 的下游会构建红，
+报错是 `go: updates to go.mod needed`——不提真正原因。该事实由
+matrix-tools/scripts/gen_floor_bumps.py 按 go.mod 差异结构化登记进 versions.json。
+本地验证：gofmt -l（空）/ go vet / go build ./... / go test -race -count=1 ./... 全过。
+
 
 ## [v0.15.2] — 2026-10-21
 
