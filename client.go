@@ -39,6 +39,12 @@ type Client struct {
 
 	// OnUsage 每次调用后的 token 记账回调（stage, promptTokens, completionTokens）。
 	OnUsage func(stage string, prompt, completion int)
+	// OnUsageDetailed 每次调用后的完整用量回调（含前缀缓存命中量等）。
+	//
+	// 与 OnUsage 并行触发、两者可同置：OnUsage 保持旧签名不破坏；需要 cached 的
+	// 消费方（成本缓存折扣、命中率观测）用本回调。UsageRecord.CachedTokens 是
+	// 命中前缀缓存的 prompt token（DeepSeek/MiMo 等端点的 PromptTokenDetails）。
+	OnUsageDetailed func(stage string, rec UsageRecord)
 	// Budget 任务 token 预算累计器（可 nil）。
 	Budget TokenAccountant
 	// Limiter 全局 LLM 请求限速器（token bucket）；nil = 不限速。
@@ -78,10 +84,13 @@ func (c *Client) BoundBudget() TokenAccountant { return c.Budget }
 func estimateTokens(s string) int { return textutil.EstTokensCJK(s) }
 
 func (c *Client) account(stage string, in []*schema.Message, out *schema.Message) {
-	var p, comp int
+	var p, comp, cached int
 	if out != nil && out.ResponseMeta != nil && out.ResponseMeta.Usage != nil {
 		u := out.ResponseMeta.Usage
 		p, comp = u.PromptTokens, u.CompletionTokens
+		// 前缀缓存命中量（CachedTokens ⊆ PromptTokens）：只在真实 usage 路径取，
+		// 估算路径无缓存概念、留 0。
+		cached = u.PromptTokenDetails.CachedTokens
 	} else {
 		for _, m := range in {
 			p += estimateTokens(m.Content)
@@ -92,6 +101,14 @@ func (c *Client) account(stage string, in []*schema.Message, out *schema.Message
 	}
 	if c.OnUsage != nil {
 		c.OnUsage(stage, p, comp)
+	}
+	if c.OnUsageDetailed != nil {
+		c.OnUsageDetailed(stage, UsageRecord{
+			Model:            c.ModelName,
+			PromptTokens:     p,
+			CachedTokens:     cached,
+			CompletionTokens: comp,
+		})
 	}
 	if c.Budget != nil {
 		c.Budget.Add(p + comp)

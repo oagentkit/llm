@@ -33,7 +33,12 @@ type CostRecord struct {
 	Stage            string // 阶段（R1/R2/R3/R4/R5/plugin:xxx）
 	PromptTokens     int
 	CompletionTokens int
-	CostUSD          float64 // 本次成本（美元）
+	// CachedTokens 命中前缀缓存的 prompt token（⊆ PromptTokens；DeepSeek/MiMo 等
+	// 端点的 PromptTokenDetails.CachedTokens）。只作观测——不改 CostUSD 计价口径
+	//（缓存折扣是厂商规则、由调用方在 Price 层覆盖，见 Price 文档）；缓存命中率
+	// = ΣCachedTokens / ΣPromptTokens，从 Summary/ModelSummary 派生。零值 = 未知。
+	CachedTokens int
+	CostUSD      float64 // 本次成本（美元）
 
 	// PriceStatus 计价状态：PricePriced / PriceUnpriced。
 	//
@@ -91,11 +96,23 @@ func (ct *CostTracker) Record(model, stage string, promptTokens, completionToken
 // 适用：企业折扣价、代理转发加价率、人民币计价合同的折算价——
 // 这些都**不属于**内建价表能覆盖的范围。
 func (ct *CostTracker) RecordPriced(model, stage string, promptTokens, completionTokens int, price Price) {
+	ct.RecordPricedCached(model, stage, promptTokens, 0, completionTokens, price)
+}
+
+// RecordPricedCached 记录一次调用（带前缀缓存命中量）。
+//
+// cachedTokens 是命中前缀缓存的 prompt token（⊆ promptTokens；DeepSeek/MiMo 等端点的
+// PromptTokenDetails.CachedTokens）。**缓存折扣不在本层算**——Price 文档已明「缓存
+// 命中价按厂商规则、由调用方覆盖」，故计价仍用 price.CostOf(promptTokens, completion)
+// 的同一口径；cachedTokens 只作观测入库（CostRecord.CachedTokens），供缓存命中率派生。
+// 需要缓存折扣成本的调用方，在 Price 层按厂商规则折算后传入（或自行摊薄 InputPerM）。
+func (ct *CostTracker) RecordPricedCached(model, stage string, promptTokens, cachedTokens, completionTokens int, price Price) {
 	ct.append(CostRecord{
 		Model:            model,
 		Stage:            stage,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
+		CachedTokens:     clampCached(promptTokens, cachedTokens),
 		CostUSD:          price.CostOf(promptTokens, completionTokens),
 		PriceStatus:      PricePriced,
 		PriceMatched:     MatchExact,
@@ -110,9 +127,15 @@ func (ct *CostTracker) RecordPriced(model, stage string, promptTokens, completio
 //
 // 需要「查不到就硬失败」的路径用 LookupPriceStrict。
 func (ct *CostTracker) RecordAuto(model, stage string, promptTokens, completionTokens int) {
+	ct.RecordAutoCached(model, stage, promptTokens, 0, completionTokens)
+}
+
+// RecordAutoCached 按价表自动计价并记录一次调用（带前缀缓存命中量）。
+// cachedTokens 语义同 RecordPricedCached：只作观测入库，不改计价口径。
+func (ct *CostTracker) RecordAutoCached(model, stage string, promptTokens, cachedTokens, completionTokens int) {
 	price, lk := ct.pricing.Lookup(model)
 	if !lk.Found() {
-		ct.RecordUnpriced(model, stage, promptTokens, completionTokens)
+		ct.RecordUnpricedCached(model, stage, promptTokens, cachedTokens, completionTokens)
 		return
 	}
 	ct.append(CostRecord{
@@ -120,6 +143,7 @@ func (ct *CostTracker) RecordAuto(model, stage string, promptTokens, completionT
 		Stage:            stage,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
+		CachedTokens:     clampCached(promptTokens, cachedTokens),
 		CostUSD:          price.CostOf(promptTokens, completionTokens),
 		PriceStatus:      PricePriced,
 		PriceKey:         lk.Key,
@@ -133,14 +157,33 @@ func (ct *CostTracker) RecordAuto(model, stage string, promptTokens, completionT
 // 「免费」——记录上的 PriceStatus=PriceUnpriced 与汇总里的 UnpricedCalls
 // 就是它的标记，运维据此告警，而不是对着恒为 0 的看板误判模型免费。
 func (ct *CostTracker) RecordUnpriced(model, stage string, promptTokens, completionTokens int) {
+	ct.RecordUnpricedCached(model, stage, promptTokens, 0, completionTokens)
+}
+
+// RecordUnpricedCached 记录一次调用（价格未知，带前缀缓存命中量）。
+// cachedTokens 只作观测入库——价格未知不影响缓存命中率可算。
+func (ct *CostTracker) RecordUnpricedCached(model, stage string, promptTokens, cachedTokens, completionTokens int) {
 	ct.append(CostRecord{
 		Model:            model,
 		Stage:            stage,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
+		CachedTokens:     clampCached(promptTokens, cachedTokens),
 		PriceStatus:      PriceUnpriced,
 		PriceMatched:     MatchNone,
 	})
+}
+
+// clampCached 归一化缓存命中量：钳到 [0, promptTokens]（cached ⊆ prompt 契约），
+// 负值归 0——坏数据不污染命中率派生。
+func clampCached(promptTokens, cachedTokens int) int {
+	if cachedTokens <= 0 {
+		return 0
+	}
+	if cachedTokens > promptTokens {
+		return promptTokens
+	}
+	return cachedTokens
 }
 
 // append 追加一条记录（环形缓冲，满窗后 O(1) 覆盖最旧）。
@@ -214,6 +257,7 @@ func (ct *CostTracker) Summary() map[string]ModelSummary {
 		s.Model = r.Model
 		s.TotalPromptTokens += r.PromptTokens
 		s.TotalCompletionTokens += r.CompletionTokens
+		s.TotalCachedTokens += r.CachedTokens
 		s.TotalCostUSD += r.CostUSD
 		s.CallCount++
 		if r.PriceStatus == PriceUnpriced {
@@ -231,8 +275,10 @@ type ModelSummary struct {
 	Model                 string
 	TotalPromptTokens     int
 	TotalCompletionTokens int
-	TotalCostUSD          float64
-	CallCount             int
+	// TotalCachedTokens 命中前缀缓存的 prompt token 累计（⊆ TotalPromptTokens）。
+	TotalCachedTokens int
+	TotalCostUSD      float64
+	CallCount         int
 	// PricedCalls 已计价的调用数。
 	PricedCalls int
 	// UnpricedCalls **价格未知**的调用数——这些调用的成本没进 TotalCostUSD。
@@ -245,4 +291,14 @@ type ModelSummary struct {
 // TotalTokens 总 token 消耗。
 func (s ModelSummary) TotalTokens() int {
 	return s.TotalPromptTokens + s.TotalCompletionTokens
+}
+
+// CacheHitRatio 前缀缓存命中率 = TotalCachedTokens / TotalPromptTokens。
+// 无 prompt（或零命中）返回 0。命中率高 = 上下文前缀稳定（provider context cache
+// 前提是字节稳定）；命中率异常低 = 提示词/工具表前缀在抖动，值得查。
+func (s ModelSummary) CacheHitRatio() float64 {
+	if s.TotalPromptTokens <= 0 {
+		return 0
+	}
+	return float64(s.TotalCachedTokens) / float64(s.TotalPromptTokens)
 }
