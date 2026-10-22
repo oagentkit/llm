@@ -2,6 +2,22 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.17.0] — 2026-10-23
+
+### 新增(cost)：CostRecord/记账入口/Client 回调补前缀缓存命中量（cached）
+
+CachedTokens（DeepSeek/MiMo 等端点的 PromptTokenDetails.CachedTokens）此前被
+usage.go 采集却在记录层/回调层静默丢弃：缓存命中率不可观测、成本缓存折扣无处表达。
+纯向后兼容加法（不碰 Price 定价哲学——缓存命中价按厂商规则、由调用方覆盖）：
+- CostRecord.CachedTokens：观测入库，不改 CostOf 计价口径
+- RecordPricedCached/RecordAutoCached/RecordUnpricedCached：带 cached 的记账入口，
+  旧三方法委托（cached=0，单源）；clampCached 钳 [0,prompt] 防坏数据污染命中率
+- ModelSummary.TotalCachedTokens + CacheHitRatio() = Σcached/Σprompt
+- Client.OnUsageDetailed(stage, UsageRecord)：与 OnUsage 并行、含 cached；
+  account() 从 PromptTokenDetails.CachedTokens 采集（估算路径留 0）
+缓存折扣成本仍由调用方在 Price 层按厂商规则表达（见 Price 文档），本 PR 只补数据面。
+Closes #37
+
 ## [v0.16.0] — 2026-10-23
 
 ### 新增(decision)：新增 System One 协议客户端（非自回归判定模型）
