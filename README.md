@@ -14,6 +14,46 @@ go get github.com/oagentkit/llm
 | `decision` | **判定面客户端**（非自回归判定模型，System One 协议：Jev/Laya/Kev/Clef…）：choice/score/noul 三原语 + 校准置信口径（本地算，两端同义） + mock/预热 |
 | `wrap` | 调用包装与限流适配 |
 | `llmtest` | 模型层契约测试套件 |
+| `llm/llm` | **兼容层**（v0.18.0 起）：历史 import 路径 `github.com/oagentkit/llm/llm` 的过渡期镜像 —— 见下节 |
+
+## 兼容层 `llm/llm`：历史 import 路径的过渡期镜像
+
+本仓的根包在 **v0.7.0 ~ v0.8.0** 期间住在 `llm/` 子目录，import 路径是
+`github.com/oagentkit/llm/llm`。**v0.9.0**（2026-10-19）把根包上移到 module 根，
+路径改成 `github.com/oagentkit/llm`，并标了 BREAKING CHANGE（见 CHANGELOG v0.9.0）。
+
+于是：任何在那四个版本期间把本仓钉进 `go.mod` 的下游，升级时都会遇到一批
+`github.com/oagentkit/llm/llm` 的 import 全部编译失败 —— 而它们用到的**符号一个都没变**，
+变的只是 import 路径这一层。
+
+`llm/llm` 子目录把老路径重新提供一次，让这类下游**不必整仓改 import**：
+
+```go
+// 老路径继续可用（过渡期）
+import "github.com/oagentkit/llm/llm"
+
+// 新代码一律用这个
+import "github.com/oagentkit/llm"
+```
+
+它**不含任何自己的实现**：
+
+- 类型是 `type X = root.X`（别名）—— 与根包是**同一个类型**，不是结构相同的两份；
+- 函数是 `var X = root.X` 转发 —— 拿到的是**同一个函数值**（不写包装函数：包装要复制签名，
+  根包改签名时它会静默分叉）；
+- 常量原样转发；包级变量按值复制（与根包共享底层数据）。
+
+镜像范围由 `llm/compat_test.go` 的 AST 比对强制：根包增删导出符号而兼容层没跟上 ⇒ 那条测试红。
+
+⚠️ **新代码不要用这一层**。它是**过渡期**产物：只镜像根包已有符号、不新增能力，
+与门面仓一样只为存量下游存在，随 0.x 版本线退役。
+
+⚠️ 它**不在**矩阵的规范包清单里。矩阵的 import 路径规则（`matrix_paths.new_import_path`）
+把「包名末段 == 仓名」收口到 module 根，`llm/llm` 那条 stutter 路径是它**刻意不产出**的
+—— 规范清单里登记它会让 `versions.json` 给两个包登记同一个 importPath。
+它在矩阵里的记录位置是 `modules.json` 的 `retiringPackages` 账本（与 `breaker` 同形状：
+只转发、无本地语义）。
+
 
 ## 定位
 
