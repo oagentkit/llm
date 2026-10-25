@@ -2,6 +2,76 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.18.0] — 2026-10-25
+
+### 新增(llm)：补 llm/llm 兼容层 —— 恢复 v0.7.0~v0.8.0 的历史 import 路径
+
+llm 的根包在 v0.7.0 ~ v0.8.0 期间住在 llm/ 子目录，import 路径是
+github.com/oagentkit/llm/llm。v0.9.0（2026-10-19）把根包上移到 module 根，
+路径改成 github.com/oagentkit/llm，并标了 BREAKING CHANGE。
+后果：钉在那四个版本上的下游升级时，一批 github.com/oagentkit/llm/llm 的
+import 全部编译失败 —— 而它们用到的符号一个都没变，变的只是 import 路径
+这一层。迁移成本是「每个引用文件改一行 import」，还可能与下游自己在做的
+改动撞车。
+本 PR 在 llm/llm 子目录补一层兼容包，把老路径重新提供一次：
+- 类型用 type X = root.X（别名）—— 与根包是同一个类型，不是结构相同的两份；
+- 函数用 var X = root.X 转发 —— 不写包装函数（包装要逐个复制签名，根包改
+  签名时它会静默分叉；var 转发把签名交给编译器守着）；
+- 常量原样转发；包级变量按值复制（与根包共享底层数据）。
+镜像根包全部 71 个导出符号（31 type / 31 func / 2 var / 7 const）。
+一致性由 llm/compat_test.go 的 AST 比对强制：根包增删导出符号而兼容层
+没跟上，那条测试会红。另有三条守卫：
+- TestCompatNoWrapperFunc：禁止写包装函数（签名会静默分叉）；
+- TestCompatAliasIdentity：证明别名是同一个类型、转发是同一个函数值；
+- TestCompatPackageIsImportable：目录名决定 import 路径末段，改了就等于
+  把老路径又改没了。
+兼容层是过渡期产物：只镜像根包已有符号、不新增能力，与门面仓一样只为存量
+下游存在，随 0.x 版本线退役。新代码一律直接 import github.com/oagentkit/llm。
+它不进矩阵的规范包清单：matrix_paths.new_import_path 把「包名末段 == 仓名」
+收口到 module 根，登记它会让 versions.json 给两个包登记同一个 importPath。
+矩阵里的记录位置是 modules.json 的 retiringPackages 账本（另开 PR）。
+关联 #47
+* fix(llm): 修 compat 层的 lint —— 废弃符号的转发与「别名同一性」断言
+CI 的 Lint 是红的（SA1019 ×2 + QF1011 ×5 + 一处死代码），本 PR 因此合不了。
+三类问题，处理方式各不相同：
+1. **SA1019（已废弃符号的转发）**：`PriceOf` / `PriceOfMatched` 在根包已废弃
+   （未配价返回 0 与「免费模型」不可区分；「最长前缀回落」会把同主干异价 SKU
+   静默定价错）。但**兼容层必须转发它们**——下游钉在 v0.7.0~v0.8.0 时按旧路径
+   引用，删掉就是编译断 ⇒ 保留转发、补 `Deprecated:` 说明（旧符号的坑一并带过来，
+   让新代码别再碰）、加 `//nolint:staticcheck` 并写明理由。
+2. **QF1011（显式类型可省略）**：那 5 行 `_ root.Client = Client{}` 看着像可简写，
+   实则**显式根包类型就是断言本身**——「兼容层与根包是同一个类型」这条语义底线
+   靠它表达（别名 ⇒ 编译期同一类型 ⇒ 可直接赋值）。简写成 `_ = Client{}` 就变成
+   断言「Client 的类型是 Client」⇒ 恒真、断言消失 ⇒ 保留显式类型 + `//nolint`。
+3. **死代码**：`exportSet.all()` 无调用点（`names()` 才在用）⇒ 删。
+本地核验：gofmt 空 / go build / go vet / go test ./... 全绿 / golangci-lint 0 issues。
+
+- 文档(llm)：刷正 README 的外部依赖清单 —— 与 go.mod 实测对账
+
+本仓 README 的「外部依赖」清单与**各仓 go.mod 的事实**对不上。
+矩阵的单一数据源 `matrix-tools/modules.json` 也有同样漂移，已在
+[matrix-tools#126](https://github.com/oagentkit/matrix-tools/pull/126) 同步刷正。
+## 现状核实
+```bash
+$ grep "eino-ext" llm/go.mod
+7:	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+23:	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17 // indirect
+$ grep -c "^github.com/cloudwego/eino-ext v" llm/go.sum
+0
+```
+⇒ eino-ext 已按组件拆成独立 module，本仓直接依赖的是 **`components/model/openai`** 那个；
+根模块 `github.com/cloudwego/eino-ext` **连 go.sum 都没有** ⇒ README 列的是一个**不存在的模块路径**。
+## 影响
+读者拿 `github.com/cloudwego/eino-ext` 去 `go get` 会拿到一个本仓根本没用的模块路径；反过来，真正的直接依赖 `eino-ext/components/model/openai` 反而没被列出来。
+## 改动
+**只改清单那一行（`- `github.com/cloudwego/eino-ext`` ⇒ `- `github.com/cloudwego/eino-ext/components/model/openai``）**，其余段落逐字未动。
+## 验收
+- [x] 清单与 `go.mod` 实测一致
+- [x] 与 `matrix-tools/modules.json` 的登记一致（同期在 matrix-tools#126 刷正）
+- [x] **纯 .md 改动** ⇒ 不需要 CHANGELOG 条目、不打 tag、不发版（无发版步骤）
+关联 oagentkit/matrix-tools#125
+
+
 ## [v0.17.1] — 2026-10-23
 
 - 杂务(deps)：oekit 依赖地板抬到 v0.20.2（concurrency）
