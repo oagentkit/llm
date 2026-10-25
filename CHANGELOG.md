@@ -2,6 +2,58 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.18.1] — 2026-10-25
+
+- 杂务(deps)：抬基座依赖地板 —— oekit/concurrency v0.22.0 / oekit/pkg v0.28.0
+
+## 现状
+llm v0.18.0（2026-10-25T09:45Z）的基座地板钉在 `oekit/concurrency v0.20.2` /
+`oekit/pkg v0.22.0`，而这两条依赖在**打 tag 之前**就已发布新版本：
+| 依赖 | v0.18.0 钉的 | 当时最新 | 发布时间 |
+| --- | --- | --- | --- |
+| `github.com/oekit/concurrency` | v0.20.2 | v0.21.0 | 2026-10-25T01:26Z |
+| `github.com/oekit/pkg` | v0.22.0 | v0.26.0 | 2026-10-25T09:21Z |
+⇒ 发版那一刻地板就不是最新。tag 受 protect-tags ruleset 保护**不能重打**
+（重打会让下游 `go.sum` 的 h1 硬失败），只能靠后续版本补齐 ——
+欠账已按 `matrix-tools/scripts/tag_floor_debt.json` 的协议记入基线
+（matrix-tools#134，还债路径见 matrix-tools#136）。
+本 PR 抬到**当前**最新（基座仓仍在高频发版）：
+- `github.com/oekit/concurrency` v0.20.2 → **v0.22.0**
+- `github.com/oekit/pkg` v0.22.0 → **v0.28.0**
+## breaking 面：逐条核实（不是照抄上游 CHANGELOG）
+跨越 v0.22.0 ~ v0.28.0 这段里唯一的 BREAKING 是 **oekit/pkg v0.26.0** 的
+`convert.ResolveClientIP` 去掉 `xri` 入参 —— 本仓与全矩阵**零调用**
+（实测 grep：`ResolveClientIP` / `GetClientIP` 在 13 个模块 + 门面上均无命中）。
+本仓实际用到的基座包只有 5 个，都不在任何 breaking 面上：
+```
+github.com/oekit/concurrency/async
+github.com/oekit/concurrency/breaker
+github.com/oekit/logx
+github.com/oekit/pkg/httpjson
+github.com/oekit/pkg/jsonrepair
+github.com/oekit/pkg/mathx
+```
+- oekit/concurrency v0.21.0 的 BREAKING 是 `ratelimit.Limiter` 接口启用
+  `Wait(ctx) error` —— 只影响**自行实现**该接口的调用方；本仓用的是
+  `async` / `breaker`，全矩阵 `ratelimit.` **零命中**；
+- oekit/pkg v0.23.0 ~ v0.28.0 其余各版均为新增/修复（cache 观测面、
+  Raw base64 变体、shellx 转义、pagination 归一化等），**不含签名删除**；
+- 全矩阵亦无 `oekit/pkg/cache` / `oekit/pkg/pagination` 的用法
+  ⇒ v0.23.0 起的 cache 行为调整与 v0.25.2 起的 pagination 变更都碰不到本仓。
+## 验证
+```
+gofmt -l .            # 无输出
+go build ./...        # OK
+go vet ./...          # OK
+go test -race -count=1 ./...   # 全绿（7 个包，含 llm/llm 兼容层）
+```
+## 后续
+本 PR 合并后走完整链：llm **v0.18.1**（预写待发版段 → 合入 → 在该 CHANGELOG 提交上
+打 annotated tag）→ 门面 `agentkit` 跟到 v1.8.51 → 从 `tag_floor_debt.json` 移出
+→ `sync-matrix` 刷矩阵源 → 拷站点副本（源先、副本后）。
+关联 matrix-tools#136
+
+
 ## [v0.18.0] — 2026-10-25
 
 ### 新增(llm)：补 llm/llm 兼容层 —— 恢复 v0.7.0~v0.8.0 的历史 import 路径
