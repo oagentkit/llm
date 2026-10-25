@@ -8,6 +8,8 @@
 
 ```
 `/`（module 根，包名 llm → import `github.com/oagentkit/llm`）
+`llm/` ← **兼容层**（v0.18.0 起）：历史 import 路径 `github.com/oagentkit/llm/llm`
+           的过渡期镜像（type alias + var 转发，无任何本地语义）—— 见下方「例外」
 `obsx/`  ← 自 obs 迁入（v0.12.0）：LLM 调用追踪 + token 用量 + 分阶段打标
 `port/`  ← 窄接口层（**不引 eino**）：Complete(ctx, req) (string, error) 形态的
            降级链 / 任务级预算 / 成本记账；预算与成本内核由根包下沉而来，
@@ -28,6 +30,20 @@
 >
 > 同仓的 `llmtest`、`wrap` 末段 ≠ 仓名，照常挂在仓下，路径不变。
 > 改布局前先跑 `python3 matrix-tools/scripts/rewrite_imports.py --print-rules` 对权威映射表。
+>
+> ⚠️ **唯一的例外：`llm/` 子目录是兼容层，不是主包**
+>
+> `llm/` 子目录**刻意复现那条 stutter 路径**（`github.com/oagentkit/llm/llm`）——
+> 它是 v0.7.0 ~ v0.8.0 真实发布过的老 import 路径的**过渡期镜像**，
+> 只为让钉在那四个版本上的存量下游不改 import 就能升过 v0.9.0。
+>
+> 与上面的规则**故意相反**，但不是例外中的例外：它不进矩阵的规范包清单
+> （`modules.json.packages` 登记它会让 `versions.json` 给两个包登记同一个
+> importPath），矩阵里的记录位置是 `retiringPackages` 账本。
+>
+> 它**不含任何自己的实现**（type alias + var 转发），不新增能力，随 0.x 版本线退役。
+> **根包仍在 module 根**——本目录不得用于承载主包。
+> 改动前先读 `llm/doc.go` 与 `llm/compat_test.go`（后者用 AST 比对强制镜像完整）。
 
 ## 硬规则
 
