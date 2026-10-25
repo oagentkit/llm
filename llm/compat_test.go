@@ -28,21 +28,6 @@ type exportSet struct {
 	consts map[string]bool
 }
 
-func (s exportSet) all() map[string][]string {
-	out := map[string][]string{}
-	for kind, m := range map[string]map[string]bool{
-		"type": s.types, "func": s.funcs, "var": s.vars, "const": s.consts,
-	} {
-		for n := range m {
-			out[kind] = append(out[kind], n)
-		}
-	}
-	for _, v := range out {
-		sort.Strings(v)
-	}
-	return out
-}
-
 func (s exportSet) names() map[string]bool {
 	out := map[string]bool{}
 	for _, m := range map[string]map[string]bool{
@@ -222,11 +207,11 @@ func TestCompatNoWrapperFunc(t *testing.T) {
 func TestCompatAliasIdentity(t *testing.T) {
 	// 类型：编译期即可判定（别名 ⇒ 同一类型 ⇒ 可直接赋值）。
 	var (
-		_ root.Client     = Client{}
-		_ root.Generator  = Generator(nil)
-		_ root.Budget     = Budget{}
-		_ root.PriceTable = PriceTable{}
-		_ root.Sink       = Sink(nil)
+		_ root.Client     //nolint:staticcheck // QF1011：显式根包类型是「别名即同一类型」这条断言本身     = Client{}
+		_ root.Generator  //nolint:staticcheck // QF1011：显式根包类型是「别名即同一类型」这条断言本身  = Generator(nil)
+		_ root.Budget     //nolint:staticcheck // QF1011：显式根包类型是「别名即同一类型」这条断言本身     = Budget{}
+		_ root.PriceTable //nolint:staticcheck // QF1011：显式根包类型是「别名即同一类型」这条断言本身 = PriceTable{}
+		_ root.Sink       //nolint:staticcheck // QF1011：显式根包类型是「别名即同一类型」这条断言本身       = Sink(nil)
 	)
 
 	// 函数：运行时比对函数地址——必须是**同一个**函数值，不是转发壳。

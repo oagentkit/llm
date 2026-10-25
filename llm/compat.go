@@ -143,9 +143,17 @@ var (
 	// NewUsageHandler 是根包 NewUsageHandler 的转发（兼容层）。
 	NewUsageHandler = root.NewUsageHandler
 	// PriceOf 是根包 PriceOf 的转发（兼容层）。
-	PriceOf = root.PriceOf
+	//
+	// Deprecated: 同根包——未配价返回 0 与「免费模型」不可区分（静默失真），
+	// 且「最长前缀回落」会把同主干异价 SKU 静默定价错。新代码用
+	// PriceTable.Lookup / LookupPrice（查不到是「价格未知」而非 0）。
+	// 兼容层仍转发它：下游钉在 v0.7.0~v0.8.0 时按旧路径引用它，删掉=编译断。
+	PriceOf = root.PriceOf //nolint:staticcheck // 兼容层必须保留已废弃的旧符号（见上方 Deprecated 说明）
 	// PriceOfMatched 是根包 PriceOfMatched 的转发（兼容层）。
-	PriceOfMatched = root.PriceOfMatched
+	//
+	// Deprecated: 同 PriceOf——未配价返回 0 与「免费模型」不可区分，前缀回落会静默误定价。
+	// 新代码用 PriceTable.Lookup（命中方式可见且不做前缀回落）。
+	PriceOfMatched = root.PriceOfMatched //nolint:staticcheck // 兼容层必须保留已废弃的旧符号（见上方 Deprecated 说明）
 	// RetryAfterFrom 是根包 RetryAfterFrom 的转发（兼容层）。
 	RetryAfterFrom = root.RetryAfterFrom
 	// RetryableLLMError 是根包 RetryableLLMError 的转发（兼容层）。
