@@ -7,10 +7,9 @@ require (
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/meguminnnnnnnnn/go-openai v0.1.6
 	github.com/oagentkit/textx v0.7.1
-	github.com/oekit/concurrency v0.23.2
-	github.com/oekit/logx v0.8.0
-	github.com/oekit/pkg v0.31.0
-	golang.org/x/time v0.14.0
+	github.com/oekit/concurrency v0.23.3
+	github.com/oekit/logx v0.8.2
+	github.com/oekit/pkg v0.31.2
 )
 
 require (
@@ -42,5 +41,6 @@ require (
 	golang.org/x/arch v0.11.0 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/time v0.14.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -2,11 +2,12 @@ package wrap
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"golang.org/x/time/rate"
+	"github.com/oekit/concurrency/ratelimit"
 )
 
 func TestRateModelNilPassthrough(t *testing.T) {
@@ -18,7 +19,9 @@ func TestRateModelNilPassthrough(t *testing.T) {
 
 func TestRateModelGenerateForwards(t *testing.T) {
 	inner := &fakeChatModel{}
-	rm := NewRateModel(inner, rate.NewLimiter(rate.Inf, 1)).(*RateModel)
+	// Inf 等价形态：巨大 rps（x/time rate.Inf = math.Inf(1)，TokenBucket 内部
+	// 即 x/time Limiter，语义一致）
+	rm := NewRateModel(inner, ratelimit.NewTokenBucketFloat(math.Inf(1), 1)).(*RateModel)
 	out, err := rm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
 	if err != nil || out == nil {
 		t.Fatalf("Generate: %v", err)
@@ -27,8 +30,9 @@ func TestRateModelGenerateForwards(t *testing.T) {
 
 func TestRateModelRespectsCancel(t *testing.T) {
 	inner := &fakeChatModel{}
-	// 0 配额限速器 + 已取消 ctx：Wait 立即返回错误，请求不出网
-	rm := NewRateModel(inner, rate.NewLimiter(rate.Limit(0.0001), 0)).(*RateModel)
+	// 0 配额限速器 + 已取消 ctx：Wait 立即返回错误（burst=0 在 oekit 是
+	// ErrBurstTooSmall、取消态是 ctx.Err()——两者都立即失败），请求不出网
+	rm := NewRateModel(inner, ratelimit.NewTokenBucketFloat(0.0001, 0)).(*RateModel)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := rm.Generate(ctx, []*schema.Message{bigTool(schema.User, 10)}); err == nil {
@@ -44,7 +48,7 @@ func TestRateModelRespectsCancel(t *testing.T) {
 
 func TestRateModelWithToolsKeepsLimiter(t *testing.T) {
 	inner := &fakeChatModel{}
-	lim := rate.NewLimiter(rate.Inf, 1)
+	lim := ratelimit.NewTokenBucketFloat(math.Inf(1), 1)
 	rm := NewRateModel(inner, lim).(*RateModel)
 	bound, err := rm.WithTools([]*schema.ToolInfo{})
 	if err != nil {

@@ -20,7 +20,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"golang.org/x/time/rate"
+	"github.com/oekit/concurrency/ratelimit"
 
 	"github.com/oagentkit/llm/obsx"
 	"github.com/oagentkit/textx/textutil"
@@ -47,8 +47,8 @@ type Client struct {
 	OnUsageDetailed func(stage string, rec UsageRecord)
 	// Budget 任务 token 预算累计器（可 nil）。
 	Budget TokenAccountant
-	// Limiter 全局 LLM 请求限速器（token bucket）；nil = 不限速。
-	Limiter *rate.Limiter
+	// Limiter 全局 LLM 请求限速器（oekit ratelimit 接口；标准构造 ratelimit.NewTokenBucketFloat，SlidingWindow 等实现可插）；nil = 不限速。
+	Limiter ratelimit.Limiter
 
 	MaxRetries int           // 最大尝试次数（含首次），默认 3
 	BaseDelay  time.Duration // 指数退避基准，默认 2s
