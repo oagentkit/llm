@@ -2,6 +2,57 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.19.0] — 2026-11-04
+
+### 重构：限速器公开面改 oekit ratelimit.Limiter 接口型（BREAKING）
+
+Client.Limiter / Resilient.Limiter / wrap.RateModel（含 NewRateModel 签名）从
+*rate.Limiter（x/time/rate）改为 oekit ratelimit.Limiter 接口型——标准构造
+ratelimit.NewTokenBucketFloat(rps, burst)，SlidingWindow 等其它实现可插；
+Limiter.Wait(ctx) 调用点零改动。x/time 退出直接依赖（TokenBucket 内部仍包
+x/time，经 oekit 传递 indirect）。翻案依据：v0.21.0 已补 Wait 阻塞档。
+deps：concurrency v0.23.3/logx v0.8.2/pkg v0.31.2
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.23.2
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.23.1` | `v0.23.2` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.7.1
+
+textx v0.7.1（2026-10-26 发布）此前一直没被抬 —— 本仓 HEAD 的新提交把这条**旧欠账**暴露在「发版时刻地板时效」门禁前 ⇒ 这次补上。
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`，宽口径）要求：**各仓 HEAD**
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+兼容性实测：本仓只用这些依赖的少量 API ⇒ go build / go vet / go test -race 全绿，
+**零行为差异**；go 指令未被顶起。
+只改 go.mod / go.sum ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.23.1
+
+oekit 基座又发了一版（`concurrency` v0.23.1，2026-10-29 02:19 CST）⇒ 上一轮抬到
+v0.23.0 的地板已经落后 ⇒ 再抬一格。
+本仓只用到 `concurrency` 的少量 API ⇒ 实测 go build / go vet / go test -race 全绿，
+**零行为差异**；go 指令未被顶起。
+只改 go.mod / go.sum ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.23.0 github.com/oekit/logx v0.8.0 github.com/oekit/pkg v0.31.0
+
+oekit 基座发了新版本（pkg v0.31.0 / concurrency v0.23.0 / logx v0.8.0）⇒ 本仓的
+依赖地板落后 ⇒ 抬到最新，让**下一次发版**不再带出落后地板（打 tag 时刻的地板
+必须是当时的最新——`verify_tag_floor` / `release.py doctor` 都在查这条）。
+兼容性实测：本仓只用这些基座包的少量 API ⇒ go build / go vet / go test -race
+全绿，**零行为差异**；go 指令未被顶起（本仓的 go 地板不动）。
+
+
 ## [v0.18.1] — 2026-10-25
 
 - 杂务(deps)：抬基座依赖地板 —— oekit/concurrency v0.22.0 / oekit/pkg v0.28.0
