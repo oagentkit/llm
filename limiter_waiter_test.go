@@ -28,7 +28,7 @@ type rejectWaiter struct{ err error }
 func (w *rejectWaiter) Wait(_ context.Context) error { return w.err }
 
 // TestClientLimiterMinimalWaiterConsumed 最小面限速器在真实物理调用路径
-//（oneAttempt）里被消费：Wait 恰好一次。
+// （oneAttempt）里被消费：Wait 恰好一次。
 func TestClientLimiterMinimalWaiterConsumed(t *testing.T) {
 	w := &onlyWaiter{}
 	c := NewClient(&llmtest.Model{Script: []llmtest.Resp{{Content: "ok"}}}, "test", nil)
