@@ -210,7 +210,7 @@ func TestDrainStreamUsageLastNonNil(t *testing.T) {
 		msgUsage, // Message 路回退 usage → 成为末个非 nil
 		&model.CallbackOutput{Config: &model.Config{Model: "m3"}}, // 尾帧无 usage：不清空
 	})
-	usage, name := DrainStreamUsage(sr)
+	usage, name, _ := DrainStreamUsage(sr)
 	if name != "m3" {
 		t.Fatalf("模型名应取末个非空: %q", name)
 	}

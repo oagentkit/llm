@@ -102,11 +102,15 @@ func NewTracingHandler(log logx.Logger, opt Options) callbacks.Handler {
 // DrainStreamUsage 排空回调副本流取末个非 nil usage 与末个非空模型名
 // （全仓单源——llm.NewUsageHandler 与本包 TracingHandler 共用；调用方负责
 // Close，本函数不关流。last-non-nil 语义：无 usage 的尾帧不清空已捕获值）。
-func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *model.TokenUsage, modelName string) {
+// DrainStreamUsage 排空副本流取末个非 nil usage / 模型名 / finish reason
+// （oagentkit/llm#70：此前只回 usage+名——流式 UsageRecord.FinishReason 恒空，
+// length 截断在流式观测面不可见，非流式同字段有真值两路不对称；末帧
+// ResponseMeta.FinishReason 通常带该值）。
+func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *model.TokenUsage, modelName string, finishReason string) {
 	for {
 		v, err := sr.Recv()
 		if err != nil {
-			return usage, modelName
+			return usage, modelName, finishReason
 		}
 		switch t := v.(type) {
 		case *model.CallbackOutput:
@@ -125,6 +129,9 @@ func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage 
 			}
 			if u := TokenUsageOf(&model.CallbackOutput{Message: t}); u != nil {
 				usage = u
+			}
+			if t.ResponseMeta != nil && t.ResponseMeta.FinishReason != "" {
+				finishReason = t.ResponseMeta.FinishReason
 			}
 		}
 	}
@@ -227,17 +234,17 @@ func (h *TracingHandler) onStreamEnd(ctx context.Context, info *callbacks.RunInf
 	// 排空会把真流式阻塞成批出（第九轮审计 C 级，与 llm.NewUsageHandler 同修）
 	async.GoSafe(func() {
 		defer output.Close()
-		usage, modelName := DrainStreamUsage(output)
+		usage, modelName, finish := DrainStreamUsage(output)
 		// usage 缺失（未开 IncludeUsage 的 provider）也落 end——与非流式 onEnd
 		// 行为一致，start/end 配对不破（第十轮审计）
-		h.logUsageEnd(ctx, info, usage, modelName)
+		h.logUsageEnd(ctx, info, usage, modelName, finish)
 	})
 	return ctx
 }
 
 // logUsageEnd 落 llm.call.end / llm.call.slow（流式/非流式共用）。usage 可
 // nil（provider 未回传时缺 token 字段，但 end/slow 与 duration 仍产出）。
-func (h *TracingHandler) logUsageEnd(ctx context.Context, info *callbacks.RunInfo, usage *model.TokenUsage, modelName string) {
+func (h *TracingHandler) logUsageEnd(ctx context.Context, info *callbacks.RunInfo, usage *model.TokenUsage, modelName, finishReason string) {
 	state, _ := ctx.Value(startStateKey{}).(startState)
 	if modelName == "" {
 		modelName = state.model
@@ -258,6 +265,9 @@ func (h *TracingHandler) logUsageEnd(ctx context.Context, info *callbacks.RunInf
 			"completion_tokens", usage.CompletionTokens,
 			"total_tokens", usage.TotalTokens,
 			"reasoning_tokens", usage.CompletionTokensDetails.ReasoningTokens)
+	}
+	if finishReason != "" {
+		fields = append(fields, "finish_reason", finishReason)
 	}
 	if h.opt.SlowThreshold > 0 && dur > h.opt.SlowThreshold {
 		h.log.Warn("llm.call.slow", fields...)
