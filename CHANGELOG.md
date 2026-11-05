@@ -6,6 +6,13 @@
 
 ### 重构：限速器公开面改 oekit ratelimit.Limiter 接口型（BREAKING）
 
+BREAKING CHANGE: Limiter 类型 breaking——*rate.Limiter（golang.org/x/time/rate 具体类型）
+→ ratelimit.Limiter（github.com/oekit/concurrency/ratelimit 接口）。影响面：
+Client.Limiter / ResilientConfig.Limiter 字段赋值与 wrap.NewRateModel(inner, limiter)
+传参点，凡传 *rate.Limiter 的下游编译即断。迁移路径：改用
+ratelimit.NewTokenBucketFloat(rps, burst) 构造接口实现（或其它 ratelimit.Limiter
+实现，如 SlidingWindow）。
+
 Client.Limiter / Resilient.Limiter / wrap.RateModel（含 NewRateModel 签名）从
 *rate.Limiter（x/time/rate）改为 oekit ratelimit.Limiter 接口型——标准构造
 ratelimit.NewTokenBucketFloat(rps, burst)，SlidingWindow 等其它实现可插；
