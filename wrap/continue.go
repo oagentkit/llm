@@ -12,6 +12,7 @@ package wrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	einomodel "github.com/cloudwego/eino/components/model"
@@ -58,8 +59,14 @@ func (m *ContinueModel) Generate(ctx context.Context, input []*schema.Message, o
 		if err != nil || next == nil {
 			// 调用方取消/超时预算耗尽不是「续写失败」，必须原样上抛——吞掉会让
 			// 上层把腰斩的半截输出当正常完成品（第八轮审计）；其余错误走部分返回
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if ctx.Err() != nil {
 				return msg, ctx.Err()
+			}
+			// provider 侧 deadline（模型自身限时，外层 ctx 健康）同样不许把
+			// 半截当完整品：包装后上抛（llm#69——此前 errors.Is 判到
+			// DeadlineExceeded 时返回 ctx.Err()==nil，(半截, nil) 零错误成功）
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return msg, fmt.Errorf("ctxrate: 续写被 provider 侧取消/限时打断（半截输出，不当完整品）: %w", err)
 			}
 			return msg, nil // 续写失败：返回已得部分
 		}
