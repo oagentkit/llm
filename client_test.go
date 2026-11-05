@@ -16,7 +16,10 @@ func TestClassifyLLMError(t *testing.T) {
 		rateLimit bool
 		truncated bool
 	}{
-		{nil, true, false, false},
+		// nil 语义与 RetryableLLMError(nil)=false 对齐（llm#65）：nil 无失败可言，
+		// ClassifyLLMError(nil) 不再返回 Retryable:true（成功路径误传 nil 会被
+		// 当成「可重试的失败」）
+		{nil, false, false, false},
 		{errors.New("401 unauthorized"), false, false, false},
 		{errors.New("invalid api key"), false, false, false},
 		{errors.New("context length exceeded"), false, false, false},
@@ -34,6 +37,16 @@ func TestClassifyLLMError(t *testing.T) {
 		{errors.New("408 request timeout"), true, false, false},
 		// 词边界：状态码不得命中耗时/计数等数字文案
 		{errors.New("request failed after 1429ms"), true, false, false},
+		// 瞬态文案不得撞确定性 marker（llm#64）：网关超时撞 ctxLen 的裸
+		// "too long"、DNS 瞬时失败撞 det4xx 的裸 "does not exist"——不重试
+		// = 放弃自愈。收窄后均应判可重试。
+		{errors.New("upstream took too long"), true, false, false},
+		{errors.New("request took too long"), true, false, false},
+		{errors.New(`lookup api.example.com on 10.0.0.10:53: read udp: name does not exist`), true, false, false},
+		// 收窄后真 ctx/模型错误仍命中
+		{errors.New("this model's maximum context length is 4097 tokens, however you asked for 8000"), false, false, false},
+		{errors.New("input is too long for this model"), false, false, false},
+		{errors.New("model does not exist: gpt-99"), false, false, false},
 		{errors.New("batch 1401 done"), true, false, false},
 		{errors.New("error, status code: 429, message: rate limited"), true, true, false},
 		// 截断 marker 必须最先判：Client 自产截断错误文本含 completion_tokens=<n>，
