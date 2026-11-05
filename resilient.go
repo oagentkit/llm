@@ -23,7 +23,6 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/oekit/concurrency/breaker"
-	"github.com/oekit/concurrency/ratelimit"
 )
 
 // Generator LLM 生成接口：*Client 与 *Resilient 都满足，调用方无感切换。
@@ -183,8 +182,8 @@ type Resilient struct {
 
 	// Budget 任务 token 预算（nil = 不限）。耗尽时全链短路。
 	Budget TokenAccountant
-	// Limiter 全局限速器（所有模型共享；nil = 不限速）。oekit ratelimit 接口（Client.Limiter 同型）。
-	Limiter ratelimit.Limiter
+	// Limiter 全局限速器（所有模型共享；nil = 不限速）。Waiter 最小面（Client.Limiter 同型）。
+	Limiter Waiter
 	// Tracker 成本追踪器（nil = 不追踪）。记账跟随实际执行的模型。
 	Tracker *CostTracker
 	// PriceTable 价表（nil = llm 内建价表）。
