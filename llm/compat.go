@@ -72,6 +72,8 @@ type (
 	UsageCallCounter = root.UsageCallCounter
 	// UsageRecord 是根包 UsageRecord 的类型别名（兼容层）。
 	UsageRecord = root.UsageRecord
+	// Waiter 是根包 Waiter 的类型别名（兼容层）。
+	Waiter = root.Waiter
 )
 
 // 常量：原样转发，类型与值均与根包一致。

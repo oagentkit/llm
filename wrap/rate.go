@@ -1,7 +1,7 @@
 // 限速装饰器：BaseChatModel 直调旁路的速率治理。直调旁路（ReAct/RawModel）
 // 绕过 Generator 链（llm.Client/Resilient）的限速是历史缺口；RateModel 挂进
 // 包装链后，直调出口每次物理调用先经全局 token bucket 等待——与 Generator
-// 链同桶，真全局。限速器类型为 oekit ratelimit 接口（与 Client.Limiter 同型
+// 链同桶，真全局。限速器类型为 llm.Waiter 最小面（与 Client.Limiter 同型
 // 可共享同一实例；标准构造 ratelimit.NewTokenBucketFloat）。
 package wrap
 
@@ -11,19 +11,20 @@ import (
 
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/oekit/concurrency/ratelimit"
+
+	"github.com/oagentkit/llm"
 )
 
 // RateModel 限速装饰器；Limiter nil = 直通。
 type RateModel struct {
 	einomodel.BaseChatModel
-	Limiter ratelimit.Limiter
+	Limiter llm.Waiter
 }
 
 var _ einomodel.ToolCallingChatModel = (*RateModel)(nil)
 
 // NewRateModel 包装 inner；limiter 为 nil 时返回原对象（零开销直通）。
-func NewRateModel(inner einomodel.BaseChatModel, limiter ratelimit.Limiter) einomodel.BaseChatModel {
+func NewRateModel(inner einomodel.BaseChatModel, limiter llm.Waiter) einomodel.BaseChatModel {
 	if limiter == nil {
 		return inner
 	}

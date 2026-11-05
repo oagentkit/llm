@@ -20,13 +20,26 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/oekit/concurrency/ratelimit"
 
 	"github.com/oagentkit/llm/obsx"
 	"github.com/oagentkit/textx/textutil"
 	"github.com/oekit/pkg/jsonrepair"
 	"github.com/oekit/pkg/mathx"
 )
+
+// Waiter 限速最小面：本包对限速器的全部消费就是 Wait(ctx)（Client 与
+// wrap.RateModel 的调用点各一处）。
+//
+// 拆出单方法接口的原因：完整四方法面（Allow/AllowN/Reserve/Wait）要求宿主
+// 自带限速器时补齐三个**永远不会被调用**的方法——其中 Reserve 的语义映射
+// 还没有合理答案（本接口「返回 0=立即可用」没有拒绝语义，x/time/rate 的
+// Reserve 有 ok=false 路径，两套语义对不齐）。Go 接口隐式满足：oekit
+// ratelimit.Limiter 的实现（TokenBucket/SlidingWindow）与任何自带 Wait 的
+// 限速器都自然满足本接口，字段类型收窄成消费面是纯放宽、零破坏。
+type Waiter interface {
+	// Wait 等待直到获取令牌或 ctx 取消；ctx 取消返回 ctx.Err()。
+	Wait(ctx context.Context) error
+}
 
 // Client LLM 客户端（带重试、限速、预算、fitInput）。
 type Client struct {
@@ -47,8 +60,10 @@ type Client struct {
 	OnUsageDetailed func(stage string, rec UsageRecord)
 	// Budget 任务 token 预算累计器（可 nil）。
 	Budget TokenAccountant
-	// Limiter 全局 LLM 请求限速器（oekit ratelimit 接口；标准构造 ratelimit.NewTokenBucketFloat，SlidingWindow 等实现可插）；nil = 不限速。
-	Limiter ratelimit.Limiter
+	// Limiter 全局 LLM 请求限速器（Waiter 最小面：仅需 Wait(ctx)；标准构造
+	// ratelimit.NewTokenBucketFloat(rps, burst)，SlidingWindow 等实现可插，
+	// 宿主自带限速器只需实现 Wait）；nil = 不限速。
+	Limiter Waiter
 
 	MaxRetries int           // 最大尝试次数（含首次），默认 3
 	BaseDelay  time.Duration // 指数退避基准，默认 2s
