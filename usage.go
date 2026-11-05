@@ -39,6 +39,12 @@ type Sink func(UsageRecord)
 type labelsKey struct{}
 
 // WithUsageLabels ctx 注入归因标签；不注入或无标签时 UsageRecord.Labels 为 nil。
+//
+// ⚠️ 注入即拷贝（快照语义，oagentkit/llm#68）：采集器从 ctx 读的是**注入时刻
+// 的快照**——晚定型归因（如选链完成后才回填的模型名）必须**二次注入整包标签**
+// （新 ctx 再传给后续调用）；只改原 map 不重注，后续记录静默退化成组件类型
+// 口径（Model 填 eino RunInfo.Type），定价恒算不出价。「何时必须重注」没有
+// 类型面约束，靠本注释纪律——调用方在自己的装配层用注释钉住注入点清单。
 func WithUsageLabels(ctx context.Context, labels map[string]string) context.Context {
 	if len(labels) == 0 {
 		return ctx

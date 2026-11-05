@@ -365,9 +365,20 @@ type Config struct {
 	Model string
 	// Timeout 单次请求超时（0=默认 DefaultTimeout）。判定模型本地是毫秒级，
 	// 超时给小了会误杀端点冷启动（首启加载检查点实测数十秒~数分钟）。
+	//
+	// ⚠️ 生效面（oagentkit/llm#66）：**仅在未注入 HTTPClient 时生效**——
+	// 内部默认客户端用它构造；注入 HTTPClient 后本字段被忽略（连接池复用
+	// 场景「配了不生效」），超时归注入方 own（给 http.Client.Timeout 或
+	// 走每请求 ctx）。
 	Timeout time.Duration
-	// HTTPClient 自定义客户端（测试注入 / 连接池复用）。留空=内部默认。
+	// HTTPClient 自定义客户端（测试注入 / 连接池复用）。留空=内部默认
+	// （按 Timeout 构造）；非空时 Timeout 不生效（见上）。
 	HTTPClient *http.Client
+	// MockAnswers mock 模式（MockEnv 置开）下的按题名覆盖答案（nil=通用
+	// 确定性缺省：choice 取候选集首个、score 中间档、noul 0.95）。
+	// 宿主领域路由名属宿主语义，由宿主经此注入——库内不烘焙（oagentkit/llm#67：
+	// 此前 mockAnswers 特判 "route"→"fault-diagnosis"，那是 bianque 的路由名）。
+	MockAnswers map[string]Answer
 }
 
 // DefaultTimeout 缺省超时。判定模型单次调用是毫秒级（本地实测 165-211ms），
@@ -379,10 +390,11 @@ const Path = "/v1/systemone"
 
 // Client 判定面客户端。并发安全（http.Client 自身并发安全，本包无共享可变态）。
 type Client struct {
-	baseURL string
-	apiKey  string
-	model   string
-	http    *http.Client
+	baseURL      string
+	apiKey       string
+	model        string
+	http         *http.Client
+	mockOverride map[string]Answer // mock 模式按题名覆盖（宿主注入）
 }
 
 // New 按配置建客户端。base_url 为空 ⇒ 返回 ErrNotConfigured（调用方据此跳过
@@ -401,10 +413,11 @@ func New(cfg Config) (*Client, error) {
 		hc = &http.Client{Timeout: timeout}
 	}
 	return &Client{
-		baseURL: strings.TrimRight(base, "/"),
-		apiKey:  strings.TrimSpace(cfg.APIKey),
-		model:   strings.TrimSpace(cfg.Model),
-		http:    hc,
+		mockOverride: cfg.MockAnswers,
+		baseURL:      strings.TrimRight(base, "/"),
+		apiKey:       strings.TrimSpace(cfg.APIKey),
+		model:        strings.TrimSpace(cfg.Model),
+		http:         hc,
 	}, nil
 }
 
@@ -433,7 +446,7 @@ func (c *Client) Decide(ctx context.Context, req Request) (*Result, error) {
 	}
 	if mockEnabled() {
 		// mock 模式：不发网络请求，本地合成答案（验接线用）。
-		return &Result{Model: "mock", Answers: mockAnswers(req), Usage: Usage{InputTokens: 32}}, nil
+		return &Result{Model: "mock", Answers: c.mockAnswers(req), Usage: Usage{InputTokens: 32}}, nil
 	}
 	body := req
 	if body.Model == "" {
@@ -493,7 +506,7 @@ func (c *Client) Warmup(ctx context.Context) error {
 // 用途与边界：mock 验的是**接线**（判定面装上了吗、快路径真会接管吗、出参形态
 // 对吗），**不是模型质量**——判定质量由真机用例（build tag decision_live）背书。
 // 别拿 mock 的准确率说事。
-const MockEnv = "BQ_DECISION_MOCK"
+const MockEnv = "DECISION_MOCK"
 
 // mockEnabled mock 模式是否开启。
 func mockEnabled() bool {
@@ -501,19 +514,20 @@ func mockEnabled() bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// mockAnswers 本地合成答案：choice 取候选集首个（题名为 route 时优先取
-// "fault-diagnosis"——确定性条目，让 e2e 断言稳定）；score 给中间档；noul 给 0.95。
-func mockAnswers(req Request) map[string]Answer {
+// mockAnswers 本地合成答案：按题名覆盖表（Config.MockAnswers，宿主注入）优先；
+// 无覆盖走通用确定性缺省——choice 取候选集首个、score 给中间档、noul 给 0.95。
+// 库内不烘焙宿主领域词（oagentkit/llm#67：此前特判 route→"fault-diagnosis"，
+// 那是 bianque 的路由名，换宿主/改路由名即静默漂移）。
+func (c *Client) mockAnswers(req Request) map[string]Answer {
 	out := make(map[string]Answer, len(req.Questions))
 	for name, q := range req.Questions {
+		if a, ok := c.mockOverride[name]; ok {
+			out[name] = a
+			continue
+		}
 		switch q.Type {
 		case TypeChoice:
 			pick := firstCandidate(q.Criteria)
-			if name == "route" {
-				if _, ok := q.Criteria.(map[string]string)["fault-diagnosis"]; ok {
-					pick = "fault-diagnosis"
-				}
-			}
 			probs := map[string]float64{}
 			if pick != "" {
 				probs[pick] = 1.0

@@ -107,3 +107,22 @@ func TestFailoverWithToolsUnsupported(t *testing.T) {
 		t.Fatal("非 ToolCallingChatModel 主/备应报错")
 	}
 }
+
+// Generate 路径 typed-nil 防御（llm#63）：此前只查接口 nil——typed-nil
+// （(*llmtest.Model)(nil) 装箱进接口）在接口方法内 nil 解引用 panic，而
+// Stream 用 isNilModel 正常跳过（「流式好使、非流式炸」）。两路径同用
+// isNilModel 后 Generate 也跳过并切备模型。
+func TestFailoverGenerateTypedNilSkipped(t *testing.T) {
+	var typedNil *llmtest.Model
+	fm := NewFailoverModel(
+		ChainLink{Model: typedNil, Name: "bad"},
+		ChainLink{Model: &llmtest.Model{Script: []llmtest.Resp{{Content: "good"}}}, Name: "backup"},
+	)
+	resp, err := fm.Generate(context.Background(), []*schema.Message{{Role: schema.User, Content: "hi"}})
+	if err != nil {
+		t.Fatalf("typed-nil 应被跳过切备模型: %v", err)
+	}
+	if resp.Content != "good" {
+		t.Fatalf("应来自备模型: %q", resp.Content)
+	}
+}

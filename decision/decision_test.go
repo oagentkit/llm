@@ -347,3 +347,37 @@ func TestMockModeOff(t *testing.T) {
 
 // ptrF 浮点指针助手。
 func ptrF(v float64) *float64 { return &v }
+
+// MockAnswers 覆盖表（llm#67）：宿主领域答案由宿主注入，库内不再烘焙
+// route→fault-diagnosis 特判。覆盖优先于通用缺省（firstCandidate）。
+func TestMockAnswersOverride(t *testing.T) {
+	t.Setenv(MockEnv, "1")
+	conf := 0.9
+	c, err := New(Config{
+		BaseURL: "http://127.0.0.1:1",
+		MockAnswers: map[string]Answer{
+			// 候选集按字典序 firstCandidate 会取 "alpha"——覆盖表强制 "beta"
+			"route": {Type: TypeChoice, Choice: "beta", Confidence: &conf},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Decide(context.Background(), Request{
+		State: "任意",
+		Questions: map[string]Question{
+			"route": {Type: TypeChoice, Criteria: map[string]string{"alpha": "", "beta": ""}},
+			"plan":  {Type: TypeNoul},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := res.Answer("route"); a.Choice != "beta" {
+		t.Errorf("覆盖答案应生效: %q", a.Choice)
+	}
+	// 未覆盖的题走通用缺省（firstCandidate 字典序首个）
+	if a, _ := res.Answer("plan"); a.Type != TypeNoul {
+		t.Errorf("未覆盖题应走通用缺省: %+v", a)
+	}
+}

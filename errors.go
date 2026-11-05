@@ -20,10 +20,15 @@ var nonRetryable4xx = []string{"400", "401", "402", "403", "404", "405", "413", 
 // marker 表预编译：原先每次 ClassifyLLMError 都现构 slice 字面量（失败路径
 // 一次调用链要分类 2~3 次）。
 var (
-	truncMarkers   = []string{"finish_reason=length", "输出被截断", "output truncated"}
-	authMarkers    = []string{"401", "403", "unauthorized", "invalid api key", "invalid_api_key", "forbidden"}
-	det4xxMarkers  = []string{"bad request", "invalid request", "invalid parameter", "invalid_parameter", "model not found", "unknown model", "no such model", "does not exist"}
-	ctxLenMarkers  = []string{"context length", "context_length", "maximum context", "max context", "too long", "too many tokens", "reduce the length", "input length"}
+	truncMarkers = []string{"finish_reason=length", "输出被截断", "output truncated"}
+	authMarkers  = []string{"401", "403", "unauthorized", "invalid api key", "invalid_api_key", "forbidden"}
+	// det4xxMarkers 注意「does not exist」必须带 model 邻接（rag#64 同族教训：
+	// 裸 "does not exist" 把 DNS 瞬时失败「name does not exist」判成确定性失败
+	// ⇒ 放弃自愈；裸 marker 的漏判方向比误重试更坏）。
+	det4xxMarkers = []string{"bad request", "invalid request", "invalid parameter", "invalid_parameter", "model not found", "unknown model", "no such model", "model does not exist"}
+	// ctxLenMarkers 同理：「too long」裸词把网关超时「upstream took too long」
+	// 判成上下文超限 ⇒ 不重试。收窄为「is/input/context + too long」邻接形态。
+	ctxLenMarkers  = []string{"context length", "context_length", "maximum context", "max context", "is too long", "input too long", "context too long", "too many tokens", "reduce the length", "input length"}
 	rateLimitMarks = []string{"429", "rate limit", "ratelimit", "too many requests", "throttl"}
 )
 
@@ -33,7 +38,11 @@ var (
 // 钱和延迟；429 可重试 + 退避下限提高；5xx/网络错误默认可重试。
 func ClassifyLLMError(err error) RetryHint {
 	if err == nil {
-		return RetryHint{Retryable: true}
+		// nil 语义与 RetryableLLMError/IsRateLimitError/IsTruncatedError 对齐
+		//（oagentkit/llm#65）：nil 无失败可言，RetryHint{} 即「不可重试」——
+		// 此前这里返回 Retryable:true 与同文件 RetryableLLMError(nil)=false
+		// 自相矛盾，成功路径误传 nil 会被当成「可重试的失败」。
+		return RetryHint{}
 	}
 	// 结构化状态码优先：不受错误文案措辞影响
 	if hint, ok := classifyByHTTPStatus(err); ok {

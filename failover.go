@@ -110,8 +110,11 @@ func (m *FailoverModel) Stream(ctx context.Context, input []*schema.Message, opt
 }
 
 // generateModel nil 模型防御（装配遗漏 fail-fast 于尝试时刻而非 panic）。
+// isNilModel 与 Stream/Resilient 共用（oagentkit/llm#63）：此前只查接口 nil，
+// typed-nil（如 (*OpenAIProvider)(nil) 装箱）走 m.Generate 在接口方法内 nil
+// 解引用 panic——「流式好使、非流式炸」的反直觉失效形态。
 func generateModel(ctx context.Context, m einomodel.BaseChatModel, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
-	if m == nil {
+	if isNilModel(m) {
 		return nil, fmt.Errorf("llm: failover 链含 nil 模型")
 	}
 	return m.Generate(ctx, input, opts...)
