@@ -2,16 +2,169 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.20.0] — 2026-11-06
+
+### 修复(wrap,obsx,usage)：provider deadline 上抛 / 流式 finish reason / 防重 doc 对齐（#69-#71）
+
+llm#69——wrap/continue 的 ctx 类错误两分：调用方取消（ctx.Err() != nil）
+原样上抛；provider 侧 deadline（外层 ctx 健康）包装后上抛——此前
+errors.Is(DeadlineExceeded) 分支返回 ctx.Err()==nil，(半截, nil) 零错误
+成功，半截内容直接进报告/工具参数。
+llm#70——流式 UsageRecord.FinishReason 不再恒空：DrainStreamUsage 增第三
+返回值（末帧 ResponseMeta.FinishReason），usage 侧与 obsx 的 logUsageEnd
+（trace 字段补 finish_reason）同步透传——length 截断在流式观测面可见，
+非流式/流式两路对称。
+llm#71——NewUsageHandler doc 与 client.go 对齐：Budget **不在防重面**
+（预算扣减不是遥测出口、不打标记），OnUsage+Budget+handler 三件套同时
+装配会计两处——照旧 doc 装配的调用方此前静默双计。代码行为不变（本就
+按 client.go 执行），修的是撒谎的那份文档。
+全仓 -race 绿。
+关联 oagentkit/llm#69 oagentkit/llm#70 oagentkit/llm#71
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+### 修复(llm)：错误面六修——typed-nil 对称/marker 收窄/nil 语义/Timeout 生效面/mock 去宿主词/Labels 快照声明（#63-#68）
+
+llm#63——generateModel 改用 isNilModel（与 Stream/Resilient 共用）：此前只查
+接口 nil，typed-nil（(*OpenAIProvider)(nil) 装箱）在接口方法内解引用 panic，
+「流式好使、非流式炸」的反直觉失效形态消除；注释「与 Stream 同契约」成真。
+llm#64——marker 收窄（AGENTS 同族实弹教训：裸子串漏判方向=放弃自愈）：
+- ctxLen 的裸 "too long" 收窄为 is/input/context + too long 邻接——网关超时
+  「upstream took too long」不再被判成上下文超限
+- det4xx 的裸 "does not exist" 收窄为 "model does not exist"——DNS 瞬时
+  失败不再被判成模型不存在
+- 未识别错误一律乐观可重试的 default 不变（宁误重试、勿弃自愈）
+llm#65——ClassifyLLMError(nil) 改回 RetryHint{}：与同文件
+RetryableLLMError(nil)=false 对齐（成功路径误传 nil 不再被当成「可重试的
+失败」），doc 写明口径。
+llm#66——decision.Config.Timeout 生效面显式声明：仅在未注入 HTTPClient 时
+生效，注入方 own 超时（此前「配了不生效」无任何信号）。
+llm#67——mock 去宿主领域词：MockEnv 值 BQ_DECISION_MOCK → DECISION_MOCK；
+mockAnswers 的 route→fault-diagnosis 特判（bianque 路由名）移除，改为
+Config.MockAnswers 按题名覆盖注入，通用确定性缺省（firstCandidate/中间档/
+0.95）保持。
+llm#68——WithUsageLabels doc 声明快照语义：注入即拷贝，晚定型归因必须
+二次注入整包标签，漏注静默退化成组件类型口径。
+测试：typed-nil 钉子 / 瞬态文案三点不撞 marker + 真错误仍命中 / nil 口径
+翻转 / MockAnswers 覆盖优先 + 未覆盖走缺省。全仓 -race 绿。
+关联 oagentkit/llm#63 oagentkit/llm#64 oagentkit/llm#65 oagentkit/llm#66 oagentkit/llm#67 oagentkit/llm#68
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+### 重构(llm)：Limiter 消费面收窄成最小 Waiter 接口——宿主只实现 Wait(ctx)
+
+v0.19.0 接口化方向正确，但接口面与消费面失配：client 全文只调
+c.Limiter.Wait(ctx)，四方法面（Allow/AllowN/Reserve/Wait）迫使宿主自带
+限速器时补齐三个永不被调用的方法——Reserve 的语义映射还没有合理答案
+（接口「返回 0=立即可用」没有拒绝语义，x/time Reserve 有 ok=false 路径），
+argus 适配时因此直接换 TokenBucket 而不是写适配器。
+改动：
+- 新增 Waiter 最小面（仅 Wait(ctx)），Client.Limiter / ResilientConfig.Limiter /
+  wrap.RateModel.Limiter / wrap.NewRateModel 参数全部改用之——字段类型
+  收窄成消费面是纯放宽：ratelimit.Limiter 实现隐式满足，存量传参零破坏
+- llm/llm 兼容层镜像 Waiter（TestCompatParity 强制）
+- 钉子测试：ratelimit.NewTokenBucketFloat 满足 Waiter；仅实现 Wait 的
+  宿主限速器可赋值且在 oneAttempt 真实路径被消费；Wait 错误原样上抛
+关联 oagentkit/llm#58
+* style(llm): gofmt 对齐 Waiter 钉子测试
+---------
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.9.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.8.0` | `v0.9.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.25.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.24.0` | `v0.25.1` |
+| `github.com/oekit/logx` | `v0.8.2` | `v0.8.3` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.8.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.7.2` | `v0.8.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.8.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.7.2` | `v0.8.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.34.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.34.0` | `v0.34.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.7.2
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.7.1` | `v0.7.2` |
+| `github.com/oekit/concurrency` | `v0.23.3` | `v0.24.0` |
+| `github.com/oekit/pkg` | `v0.31.2` | `v0.34.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+
 ## [v0.19.0] — 2026-11-04
 
 ### 重构：限速器公开面改 oekit ratelimit.Limiter 接口型（BREAKING）
-
-BREAKING CHANGE: Limiter 类型 breaking——*rate.Limiter（golang.org/x/time/rate 具体类型）
-→ ratelimit.Limiter（github.com/oekit/concurrency/ratelimit 接口）。影响面：
-Client.Limiter / ResilientConfig.Limiter 字段赋值与 wrap.NewRateModel(inner, limiter)
-传参点，凡传 *rate.Limiter 的下游编译即断。迁移路径：改用
-ratelimit.NewTokenBucketFloat(rps, burst) 构造接口实现（或其它 ratelimit.Limiter
-实现，如 SlidingWindow）。
 
 Client.Limiter / Resilient.Limiter / wrap.RateModel（含 NewRateModel 签名）从
 *rate.Limiter（x/time/rate）改为 oekit ratelimit.Limiter 接口型——标准构造
