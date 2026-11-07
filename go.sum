@@ -85,8 +85,8 @@ github.com/oekit/concurrency v0.28.0 h1:niGFAbA5s0vuUShofur479ZbzMSw4BtVDEBFb4Bv
 github.com/oekit/concurrency v0.28.0/go.mod h1:dJ8h++l2iUtRZDxvCIKWv+jth7fO9VlD1IoM+WTW9BY=
 github.com/oekit/logx v0.8.5 h1:SC8WxVTmLLPG7OdGJl90FHSyn8UwmaBJoNOQqvYgNvs=
 github.com/oekit/logx v0.8.5/go.mod h1:wUsASSs8nfRzr/l7rpf+96q1VyPY74S3EdkBKCVxajo=
-github.com/oekit/pkg v0.37.0 h1:aEaVTkYhc5od3vqQisn2LIwfn5HBow8lQPHF2bjGu2I=
-github.com/oekit/pkg v0.37.0/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
+github.com/oekit/pkg v0.37.1 h1:Hq8FJnTtKNTyJ5gNFUl9ORQkM3WwzSriOHnUmF9bbyA=
+github.com/oekit/pkg v0.37.1/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
 github.com/onsi/ginkgo v1.6.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/ginkgo v1.8.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/gomega v1.5.0/go.mod h1:ex+gbHU/CVuBBDIJjb2X0qEXbFg53c61hWP/1CpauHY=
