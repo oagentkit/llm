@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/oagentkit/textx/textutil"
+	"io"
+	"math"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/oagentkit/textx/textutil"
+	"github.com/oekit/concurrency/ratelimit"
 )
 
 // assistantRound 构造一个带工具调用的 assistant 轮起点（工具结果的所属轮）。
@@ -405,4 +409,104 @@ func (m *usageEchoModel) Stream(ctx context.Context, input []*schema.Message, op
 	w.Send(out, nil)
 	w.Close()
 	return sr, nil
+}
+
+// fanoutStreamModel Stream 返回预置子流（base.Copy 扇出产物——模拟 eino
+// callbacks/ADK 对模型流的分发形态：装饰器拿到的就是 childStreamReader）。
+type fanoutStreamModel struct {
+	fakeChatModel
+	sr *schema.StreamReader[*schema.Message]
+}
+
+func (m *fanoutStreamModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return m.sr, nil
+}
+
+// TestFitModelStreamClosesInnerOnEOF 回归（oagentkit/llm#80）：eino 契约
+// 「reader 必须恰好 Close 一次——EOF 后也必须 Close」。observeUsage 此前只在
+// 错误路径 Close 内层流、正常 EOF 直接 return：内层流经 Copy 扇出时，子流不
+// Close 则父流 closedNum 永不收口，副本链分片滞留。用 Copy(2) 扇出桩钉住：
+// 外层 EOF 可见（happens-before：实现先关内层再关外层）后，装饰器持有的
+// 子流必须已 Close（再 Recv 报 ErrRecvAfterClosed 而非缓存 io.EOF——未
+// Close 的子流恒可重复 Recv 出 io.EOF）。
+func TestFitModelStreamClosesInnerOnEOF(t *testing.T) {
+	base, sw := schema.Pipe[*schema.Message](2)
+	_ = sw.Send(&schema.Message{Role: schema.Assistant, Content: "a"}, nil)
+	_ = sw.Send(&schema.Message{Role: schema.Assistant, Content: "b",
+		ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 2}}}, nil)
+	sw.Close()
+	kids := base.Copy(2)
+	f := NewFitModel(&fanoutStreamModel{sr: kids[0]}, "s", "m", 0, 0, nil)
+
+	out, err := f.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for i := 0; ; i++ {
+		_, err := out.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("out.Recv: %v", err)
+		}
+		if i >= 2 {
+			t.Fatal("两块后应收 EOF")
+		}
+	}
+	out.Close() // 消费方契约：EOF 后关外层
+	// 外层 EOF 即保证内层已 Close（实现按「先内后外」顺序关流）
+	if _, err := kids[0].Recv(); !errors.Is(err, schema.ErrRecvAfterClosed) {
+		t.Fatalf("EOF 后装饰器必须 Close 内层流（eino 契约，llm#80），Recv got %v", err)
+	}
+	kids[1].Close() // 另一消费者正常关闭：父流收口路径不 panic
+}
+
+// checkerEnabledModel 模拟 eino-ext 回调契约的桩：实现 components.Checker
+// 且启用（真实 eino-ext 模型即此形态——回调由组件内部自燃）。WithTools
+// 返回自身（eino-ext 同款：绑定后仍是同一个组件实例，Checker 判定不丢）。
+type checkerEnabledModel struct{ fakeChatModel }
+
+func (c *checkerEnabledModel) IsCallbacksEnabled() bool { return true }
+
+func (c *checkerEnabledModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return c, nil
+}
+
+// TestWrapDecoratorsForwardCallbacksChecker 回归（oagentkit/llm#86）：装饰器
+// 自身不发回调，须转发内层模型的 Checker 判定——否则 compose 认为组件「不会
+// 自己发回调」，在节点外再注入一轮 OnStart/OnEnd，一次调用产出两条 usage
+// 记录（预算/成本双计）。内层未实现 Checker 时如实返回 false（框架兜底注入）。
+func TestWrapDecoratorsForwardCallbacksChecker(t *testing.T) {
+	enabled := &checkerEnabledModel{}
+	plain := &fakeChatModel{}
+
+	if !components.IsCallbacksEnabled(NewFitModel(enabled, "s", "m", 0, 0, nil)) {
+		t.Fatal("FitModel 应转发内层 Checker 判定（启用→true）")
+	}
+	if components.IsCallbacksEnabled(NewFitModel(plain, "s", "m", 0, 0, nil)) {
+		t.Fatal("内层未实现 Checker 时 FitModel 应如实返回 false")
+	}
+	if !components.IsCallbacksEnabled(NewContinueModel(enabled, "s", nil)) {
+		t.Fatal("ContinueModel 应转发内层 Checker 判定")
+	}
+	if components.IsCallbacksEnabled(NewContinueModel(plain, "s", nil)) {
+		t.Fatal("内层未实现 Checker 时 ContinueModel 应如实返回 false")
+	}
+	lim := ratelimit.NewTokenBucketFloat(math.Inf(1), 1)
+	if !components.IsCallbacksEnabled(NewRateModel(enabled, lim).(*RateModel)) {
+		t.Fatal("RateModel 应转发内层 Checker 判定")
+	}
+	if components.IsCallbacksEnabled(NewRateModel(plain, lim).(*RateModel)) {
+		t.Fatal("内层未实现 Checker 时 RateModel 应如实返回 false")
+	}
+
+	// WithTools 再包装链上判定不丢（桩的 WithTools 返回自身，eino-ext 同款）。
+	bound, err := NewFitModel(enabled, "s", "m", 0, 0, nil).WithTools(nil)
+	if err != nil {
+		t.Fatalf("WithTools: %v", err)
+	}
+	if !components.IsCallbacksEnabled(bound) {
+		t.Fatal("WithTools 派生的 FitModel 应保持 Checker 转发")
+	}
 }

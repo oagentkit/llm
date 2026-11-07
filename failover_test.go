@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/oagentkit/llm/llmtest"
@@ -180,5 +185,117 @@ func TestFailoverAllNilChainErrorCopy(t *testing.T) {
 	}
 	if !strings.Contains(gerr.Error(), "nil 模型") {
 		t.Fatalf("应指向 nil 链节装配问题: %v", gerr)
+	}
+}
+
+// checkerModel 模拟 eino-ext 回调契约的桩：实现 components.Checker 且启用
+// （真实 eino-ext 模型即此形态——compose 据此跳过节点级回调注入）。
+type checkerModel struct{ *llmtest.Model }
+
+func (c *checkerModel) IsCallbacksEnabled() bool { return true }
+
+// TestFailoverIsCallbacksEnabled 回归（oagentkit/llm#86）：链上任一链节启用
+// 回调即 true——否则启用链节的自燃回调与 compose 节点级注入双发，一次调用
+// 产出两条 usage 记录（预算/成本双计）。全部链节未实现 Checker 时如实返回
+// false，由框架注入节点级回调兜底（此时无双计风险）。
+func TestFailoverIsCallbacksEnabled(t *testing.T) {
+	plain := &llmtest.Model{Script: []llmtest.Resp{{Content: "ok"}}}
+	if components.IsCallbacksEnabled(NewFailoverModel(ChainLink{Model: plain, Name: "a"})) {
+		t.Fatal("链节未实现 Checker 时应返回 false（框架兜底注入）")
+	}
+
+	enabled := &checkerModel{Model: &llmtest.Model{Script: []llmtest.Resp{{Content: "ok"}}}}
+	fm := NewFailoverModel(ChainLink{Model: plain, Name: "a"}, ChainLink{Model: enabled, Name: "b"})
+	if !components.IsCallbacksEnabled(fm) {
+		t.Fatal("任一链节启用回调即应返回 true")
+	}
+}
+
+// selfEmitCheckerModel 完整模拟 eino-ext 回调契约（oagentkit/llm#86 复现形态）：
+// 实现 components.Checker 且在组件内部自燃 OnStart/OnEnd（acl/openai 每 chunk
+// sw.Send(&model.CallbackOutput{...}) 即此路径）。裸桩进 compose 图只走自燃
+// 一条路；不实现 Checker 的装饰器会让 compose 再注入一轮节点级回调 → 双计。
+type selfEmitCheckerModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *selfEmitCheckerModel) IsCallbacksEnabled() bool { return true }
+
+func (m *selfEmitCheckerModel) Generate(ctx context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	ctx = callbacks.EnsureRunInfo(ctx, "StubOpenAI", components.ComponentOfChatModel)
+	ctx = callbacks.OnStart(ctx, &model.CallbackInput{Messages: in})
+	msg := &schema.Message{Role: schema.Assistant, Content: "ok",
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+			Usage:        &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+		}}
+	callbacks.OnEnd(ctx, &model.CallbackOutput{Message: msg,
+		TokenUsage: &model.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}})
+	return msg, nil
+}
+
+// Stream 单块流直通（本回归只走 Invoke 非流式路径，契约补齐用）。
+func (m *selfEmitCheckerModel) Stream(ctx context.Context, in []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, in, opts...)
+	if err != nil {
+		return nil, err
+	}
+	sr, w := schema.Pipe[*schema.Message](1)
+	_ = w.Send(msg, nil)
+	w.Close()
+	return sr, nil
+}
+
+// TestFailoverCheckerSingleUsageRecordInCompose 回归（oagentkit/llm#86）：
+// 装饰模型进 compose 图后一次调用只许产出一条 usage 记录。此前 FailoverModel
+// 未实现 eino Checker——compose 在节点外再注入一轮 OnEnd（输出为装饰器返回的
+// Message，经 ResponseMeta.Usage 回退也成一条记录），NewUsageHandler 记两条，
+// 消费方把记录灌进预算即按 2 倍烧。
+func TestFailoverCheckerSingleUsageRecordInCompose(t *testing.T) {
+	stub := &selfEmitCheckerModel{}
+	fm := NewFailoverModel(ChainLink{Model: stub, Name: "stub"})
+
+	var mu sync.Mutex
+	var recs []UsageRecord
+	h := NewUsageHandler(func(r UsageRecord) {
+		mu.Lock()
+		recs = append(recs, r)
+		mu.Unlock()
+	})
+	ctx := callbacks.InitCallbacks(context.Background(), nil, h)
+
+	g := compose.NewGraph[[]*schema.Message, *schema.Message]()
+	if err := g.AddChatModelNode("m", fm); err != nil {
+		t.Fatalf("AddChatModelNode: %v", err)
+	}
+	if err := g.AddEdge(compose.START, "m"); err != nil {
+		t.Fatalf("AddEdge start: %v", err)
+	}
+	if err := g.AddEdge("m", compose.END); err != nil {
+		t.Fatalf("AddEdge end: %v", err)
+	}
+	r, err := g.Compile(context.Background())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	out, err := r.Invoke(ctx, []*schema.Message{schema.UserMessage("hi")})
+	if err != nil || out.Content != "ok" {
+		t.Fatalf("Invoke: %v %q", err, out.Content)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recs) != 1 {
+		t.Fatalf("compose 图内一次调用应只产 1 条 usage 记录（Checker 防节点级注入双计），got %d: %+v", len(recs), recs)
+	}
+	// 修复后 compose 不再注入节点级回调，唯一记录来自内层自燃（RunInfo 为
+	// compose 注入的节点信息，Type 归因装饰器——图内组件自燃的标准归属）；
+	// 未修复时第二条来自节点级注入、归因相同但 usage 重复。
+	if recs[0].PromptTokens != 10 || recs[0].CompletionTokens != 5 || recs[0].TotalTokens != 15 {
+		t.Fatalf("记录应携带内层自燃回调的 usage: %+v", recs[0])
 	}
 }

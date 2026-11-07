@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/cloudwego/eino/components"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -33,6 +34,22 @@ type FailoverModel struct {
 
 // 编译期断言：ADK 绑工具经 ToolCallingChatModel.WithTools，装饰器必须可派生。
 var _ einomodel.ToolCallingChatModel = (*FailoverModel)(nil)
+
+// IsCallbacksEnabled 实现 eino components.Checker（oagentkit/llm#86）：
+// 链上任一链节启用回调即视为启用——compose/ADK 据此跳过节点级回调注入，
+// 否则启用链节的自燃回调与节点级注入双发，一次调用产出两条 usage 记录
+// （预算/成本双计，对齐 eino ADK failover proxy 模式）。全部链节未启用时
+// 如实返回 false，由框架注入节点级回调兜底（此时无双计风险）。
+func (m *FailoverModel) IsCallbacksEnabled() bool {
+	for _, mm := range m.models {
+		if components.IsCallbacksEnabled(mm) {
+			return true
+		}
+	}
+	return false
+}
+
+var _ components.Checker = (*FailoverModel)(nil)
 
 // ChainLink failover 链单链节：模型 + 观测名（结构化链节消平行切片错位——
 // names[i] 对不上 models[i] 是装配期静默事故）。

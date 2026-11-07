@@ -220,6 +220,48 @@ func TestDrainStreamUsageLastNonNil(t *testing.T) {
 	sr.Close() // 调用方负责 Close 契约
 }
 
+// TestDrainStreamUsageFinishReasonFromCallbackOutput 回归（oagentkit/llm#87）：
+// eino-ext 流式真实帧是 *model.CallbackOutput（acl/openai 每 chunk
+// sw.Send(&model.CallbackOutput{Message, Config, TokenUsage})，经
+// OnEndWithStreamOutput 直达 DrainStreamUsage）——#70 修复只在 *schema.Message
+// 分支提取 finish，CallbackOutput 分支漏掉 ⇒ 最主流帧形态上 finish_reason 恒空，
+// length 截断在流式观测面不可见。两分支经 finishReasonOf 单源化后均须可提取。
+func TestDrainStreamUsageFinishReasonFromCallbackOutput(t *testing.T) {
+	// eino-ext 帧形态：delta 帧无 finish，末帧 Message.ResponseMeta 带 "length"
+	sr := schema.StreamReaderFromArray([]callbacks.CallbackOutput{
+		&model.CallbackOutput{
+			Message: &schema.Message{Role: schema.Assistant, Content: "部分"},
+			Config:  &model.Config{Model: "gpt-x"},
+		},
+		&model.CallbackOutput{
+			Message: &schema.Message{Role: schema.Assistant, Content: "",
+				ResponseMeta: &schema.ResponseMeta{FinishReason: "length"}},
+			Config:     &model.Config{Model: "gpt-x"},
+			TokenUsage: &model.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+		},
+	})
+	usage, name, finish := DrainStreamUsage(sr)
+	sr.Close()
+	if finish != "length" {
+		t.Fatalf("CallbackOutput 帧的 FinishReason 应被提取（llm#87），got %q", finish)
+	}
+	if usage == nil || usage.PromptTokens != 10 || usage.TotalTokens != 15 {
+		t.Fatalf("usage 提取不应回归: %+v", usage)
+	}
+	if name != "gpt-x" {
+		t.Fatalf("模型名提取不应回归: %q", name)
+	}
+
+	// 对照组：*schema.Message 帧形态保持 #70 已修行为
+	sr2 := schema.StreamReaderFromArray([]callbacks.CallbackOutput{
+		&schema.Message{Role: schema.Assistant, ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"}},
+	})
+	if _, _, finish2 := DrainStreamUsage(sr2); finish2 != "stop" {
+		t.Fatalf("Message 帧的 FinishReason 提取不应回归，got %q", finish2)
+	}
+	sr2.Close()
+}
+
 func TestTracingHandlerStreamEnd(t *testing.T) {
 	rl := &recordLogger{Logger: logx.NewSlogLogger("test")}
 

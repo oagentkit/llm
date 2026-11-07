@@ -164,9 +164,16 @@ func WithTracker(t *CostTracker) ChainOption {
 	return func(c *Chain) { c.tracker = t }
 }
 
-// WithBreaker 绑定熔断器（按环节名分桶）。
+// WithBreaker 绑定熔断器（按环节名分桶）。nil = 未设置（保留 NewChain 装的
+// 缺省 NewBreakers，与 WithClassifier 同纪律）——此前 nil 直接覆盖清掉缺省，
+// 首次 Complete 在 c.breakers.Allow 上空指针 panic（oagentkit/llm#88）。
+// 本选项没有「显式禁用熔断」语义（Breakers 不存在禁用态）。
 func WithBreaker(b *Breakers) ChainOption {
-	return func(c *Chain) { c.breakers = b }
+	return func(c *Chain) {
+		if b != nil {
+			c.breakers = b
+		}
+	}
 }
 
 // WithRetries 每个环节的重试次数（不含首次），默认 1（即不重试）。

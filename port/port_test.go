@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oekit/concurrency/breaker"
+
 	"github.com/oagentkit/textx/textutil"
 )
 
@@ -283,5 +285,37 @@ func TestChainEmptyChain(t *testing.T) {
 	_, err := NewChain().Complete(context.Background(), Request{Prompt: "hi"})
 	if !errors.Is(err, ErrEmptyChain) {
 		t.Fatalf("空链应返回 ErrEmptyChain，实际 %v", err)
+	}
+}
+
+// TestChainWithBreakerNilKeepsDefault 回归（oagentkit/llm#88）：WithBreaker(nil)
+// 此前无 nil 防御、直接清掉 NewChain 装的缺省 NewBreakers，首次 Complete 在
+// c.breakers.Allow 上空指针 panic。nil 语义 = 未设置（保留缺省），与同构造器
+// 兄弟选项 WithClassifier 同纪律。
+func TestChainWithBreakerNilKeepsDefault(t *testing.T) {
+	f := &fakeCompleter{out: "ok"}
+	chain := NewChain(WithCompleter("m", f), WithBreaker(nil))
+	out, err := chain.Complete(context.Background(), Request{Prompt: "hi"})
+	if err != nil || out != "ok" {
+		t.Fatalf("WithBreaker(nil) 应保留缺省熔断器并正常调用: %v %q", err, out)
+	}
+}
+
+// TestChainWithBreakerCustomTakesEffect 非 nil 路径：自定义 Breakers 真正接管
+// 分桶——连败 1 次即熔断（WithConsecutiveFailures(1)），第二次 Complete 直接
+// ErrCircuitOpen，Completer 零调用。
+func TestChainWithBreakerCustomTakesEffect(t *testing.T) {
+	b := NewBreakers(breaker.WithConsecutiveFailures(1))
+	f := &fakeCompleter{err: errors.New("上游 500")}
+	chain := NewChain(WithCompleter("m", f), WithBreaker(b), WithRetries(0))
+	if _, err := chain.Complete(context.Background(), Request{Prompt: "hi"}); err == nil {
+		t.Fatal("首次调用应失败上抛")
+	}
+	_, err := chain.Complete(context.Background(), Request{Prompt: "hi"})
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("自定义熔断器连败 1 次后应打开: %v", err)
+	}
+	if f.calls != 1 {
+		t.Fatalf("熔断打开后 Completer 不应再被调用，实际 %d 次", f.calls)
 	}
 }
