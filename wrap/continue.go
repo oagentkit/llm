@@ -72,7 +72,7 @@ func (m *ContinueModel) Generate(ctx context.Context, input []*schema.Message, o
 		}
 		merged := *msg
 		merged.Content = msg.Content + next.Content
-		merged.ResponseMeta = next.ResponseMeta // 以最新 finish reason 供下轮判定
+		merged.ResponseMeta = mergeContinueMeta(msg.ResponseMeta, next.ResponseMeta)
 		added := len([]rune(next.Content))
 		msg = &merged
 		if m.OnContinue != nil {
@@ -80,6 +80,35 @@ func (m *ContinueModel) Generate(ctx context.Context, input []*schema.Message, o
 		}
 	}
 	return msg, nil
+}
+
+// mergeContinueMeta 续写轮 meta 合并（llm#82）：FinishReason 以末轮为准
+// （下轮截断判定取最新语义）；Usage 逐轮累加——prompt 取首轮（整段上下文按
+// 一份计，续写轮重复回传的部分不重复记账），completion 求和（真实总输出），
+// total 重算为 prompt+completion 保持自洽。此前以末轮 meta 整体覆盖，首轮
+// （通常占输出大头）的 usage 从最终消息上消失——下游按 ResponseMeta.Usage
+// 记账的消费方对「截断+续写」只计末轮，恰在长输出（成本最高）场景失真。
+func mergeContinueMeta(first, last *schema.ResponseMeta) *schema.ResponseMeta {
+	if last == nil {
+		// 末轮无 meta：保持置 nil 的旧语义——isTruncated 随之落空、续写循环
+		// 收口（不得沿用首轮的 length，否则对不回传 meta 的模型反复续写）
+		return nil
+	}
+	merged := *last
+	if first == nil || first.Usage == nil {
+		return &merged // 首轮无 usage：末轮 usage 即总量，原样保留
+	}
+	if last.Usage == nil {
+		// 末轮缺 usage（部分兼容端点不回传）：保住首轮 usage 不丢账
+		u := *first.Usage
+		merged.Usage = &u
+		return &merged
+	}
+	u := *first.Usage
+	u.CompletionTokens += last.Usage.CompletionTokens
+	u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	merged.Usage = &u
+	return &merged
 }
 
 // isTruncated 截断判定：finish reason 为 length/max_tokens 且无工具调用。

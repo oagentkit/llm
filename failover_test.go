@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
@@ -124,5 +125,60 @@ func TestFailoverGenerateTypedNilSkipped(t *testing.T) {
 	}
 	if resp.Content != "good" {
 		t.Fatalf("应来自备模型: %q", resp.Content)
+	}
+}
+
+// TestFailoverTailNilKeepsPriorError（llm#85）：链尾 nil 模型的装配错误不得
+// 掩盖前链真实错误——倒数第二节的 429 应保留在最终错误里，且 Generate 与
+// Stream 同口径（此前 Generate 只报「链含 nil 模型」、Stream 落入「链为空」，
+// 同一故障两个文案、且都不是真实根因）。
+func TestFailoverTailNilKeepsPriorError(t *testing.T) {
+	rateLimited := errors.New("429 rate limited")
+	newChain := func() *FailoverModel {
+		return NewFailoverModel(
+			ChainLink{Model: &llmtest.Model{RepeatLast: true, Script: []llmtest.Resp{{Err: rateLimited}}}, Name: "real"},
+			ChainLink{Model: nil, Name: "bad-tail"},
+		)
+	}
+	fm := newChain()
+	_, gerr := fm.Generate(context.Background(), msgs("hi"))
+	if gerr == nil {
+		t.Fatal("Generate 应报错")
+	}
+	if !errors.Is(gerr, rateLimited) {
+		t.Fatalf("Generate 应保留前链真实 429 错误: %v", gerr)
+	}
+	if !strings.Contains(gerr.Error(), "nil 模型") {
+		t.Fatalf("Generate 应并列保留 nil 链节装配信息: %v", gerr)
+	}
+
+	fm2 := newChain()
+	_, serr := fm2.Stream(context.Background(), msgs("hi"))
+	if serr == nil {
+		t.Fatal("Stream 应报错")
+	}
+	if !errors.Is(serr, rateLimited) {
+		t.Fatalf("Stream 应保留前链真实 429 错误: %v", serr)
+	}
+	if !strings.Contains(serr.Error(), "nil 模型") {
+		t.Fatalf("Stream 应与 Generate 同口径（nil 链节信息并列）: %v", serr)
+	}
+}
+
+// TestFailoverAllNilChainErrorCopy（llm#85）：全 nil 链 Generate/Stream 返回
+// 同一装配错误文案——此前 Stream 落入误导性的「failover 链为空」。
+func TestFailoverAllNilChainErrorCopy(t *testing.T) {
+	var typedNil *llmtest.Model
+	fm := NewFailoverModel(ChainLink{Model: typedNil, Name: "a"}, ChainLink{Model: nil, Name: "b"})
+	_, gerr := fm.Generate(context.Background(), msgs("hi"))
+	_, serr := fm.Stream(context.Background(), msgs("hi"))
+	if gerr == nil || serr == nil {
+		t.Fatalf("全 nil 链应报错: %v / %v", gerr, serr)
+	}
+	if gerr.Error() != serr.Error() {
+		t.Fatalf("Generate/Stream 错误文案应一致: %q vs %q", gerr, serr)
+	}
+	if !strings.Contains(gerr.Error(), "nil 模型") {
+		t.Fatalf("应指向 nil 链节装配问题: %v", gerr)
 	}
 }

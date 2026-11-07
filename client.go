@@ -68,6 +68,14 @@ type Client struct {
 	MaxRetries int           // 最大尝试次数（含首次），默认 3
 	BaseDelay  time.Duration // 指数退避基准，默认 2s
 	MaxDelay   time.Duration // 退避上限，默认 30s
+
+	// AttemptTimeout 单次尝试独立限时（0=不限，默认；llm#84）。单客户端路径
+	// 对齐 Resilient 链的 per-provider AttemptTimeout：挂死的 provider 连接
+	// （TLS 黑洞、网关半开、流式静默断流）由本限时兜底，而不是把整个重试
+	// 循环的时间预算耗在第一次尝试上。每次物理尝试各自计时——刻意不覆盖
+	// 整个重试循环（首次尝试耗满 deadline 后重试全部形同虚设）。
+	// 建议量级 60–120s；最坏挂钟预算口径：≈ MaxRetries×AttemptTimeout + Σ退避。
+	AttemptTimeout time.Duration
 }
 
 // NewClient 创建 LLM 客户端。
@@ -167,10 +175,12 @@ func (c *Client) retryPolicy() retryPolicy {
 		ceil = 30 * time.Second
 	}
 	return retryPolicy{
-		maxAttempts:   maxRetries,
-		base:          base,
-		ceil:          ceil,
-		chainFallback: false, // 单客户端无备选模型，429 值得退避等待
+		maxAttempts:    maxRetries,
+		base:           base,
+		ceil:           ceil,
+		chainFallback:  false,            // 单客户端无备选模型，429 值得退避等待
+		attemptTimeout: c.AttemptTimeout, // 0=不限；单次尝试独立限时（llm#84），
+		// 此前该字段恒 0——attemptCtx 原样透传，挂死 provider 只能靠外层 ctx
 	}
 }
 
@@ -222,8 +232,14 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 			if truncatedBoosted || c.MaxOutputTokens <= 0 {
 				break
 			}
-			opts = append(opts, model.WithMaxTokens(c.MaxOutputTokens*3/2))
+			boosted := c.MaxOutputTokens * 3 / 2
+			opts = append(opts, model.WithMaxTokens(boosted))
 			truncatedBoosted = true
+			// 提升输出上限的那轮按新上限重算输入预算再裁剪一次（llm#83）：
+			// 输入按 1 倍预留裁剪过，1.5 倍输出上限 + 原输入可能 > 窗口——
+			// 二次尝试以 context too long 收场，还会被 ClassifyLLMError 判成
+			// 确定性失败，在降级链上白烧一次模型切换
+			c.fitInputFor(boosted, msgs)
 		}
 		attempts = attempt + 1
 		out, err := c.oneAttempt(ctx, stage, msgs, pol.attemptTimeout, opts)
@@ -343,8 +359,9 @@ func (c *Client) GenerateJSON(ctx context.Context, stage string, msgs []*schema.
 // Resilient 的 JSON 路径固定经 GenerateJSON 落到 Client 字段推导的 policy
 // （buildClient 设 MaxRetries=1），同模型传输重试在 JSON 路径整体失效：一个
 // 瞬态 500 就切模型，与 Generate 路径行为不对称（第六轮审计）。
-// pol.attemptTimeout 不参与——JSON 路径语义是"单次完整生成调用"共享一个
-// 外层 deadline（见 tryOneProviderJSON 的超时接线）。
+// pol.attemptTimeout 经 generateRetry 参与每次物理尝试（Client 直用时来自
+// AttemptTimeout 字段，llm#84）；Resilient 侧显式传 0——其 JSON 路径语义是
+// "单次完整生成调用"共享一个外层 deadline（见 tryOneProviderJSON 的超时接线）。
 func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*schema.Message, out any, pol retryPolicy) error {
 	// 入口校验（reflect 改写前）：out 必须是非 nil 指针——原 json.Unmarshal 对
 	// 误用返回 InvalidUnmarshalError，reflect 路径不校验会 panic
@@ -389,12 +406,19 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 // fitInput 发送前输入自守恒：总输入超 (窗口-输出预留)×2×0.9 时，
 // 截断最长的 user 消息并留痕（兜底层，正常轮不到）。
 func (c *Client) fitInput(msgs []*schema.Message) {
+	c.fitInputFor(c.MaxOutputTokens, msgs)
+}
+
+// fitInputFor 指定输出预留额的输入自守恒（fitInput 的参数化形态）。截断提升轮
+// 以 1.5 倍输出上限重算预算再裁剪（llm#83）——预留只认「本轮实际声明的输出
+// 上限」，不认构造时的缺省值。
+func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) {
 	if c.ContextTokens <= 0 {
 		return
 	}
 	// 预算公式单源 textutil.FitCharsLimit（第十轮收口：与 wrap.FitModel 双份
 	// 手写漂移无编译期信号；CJK 感见 ×3/2 语义见彼处注释）
-	limit := textutil.FitCharsLimit(c.ContextTokens, c.MaxOutputTokens)
+	limit := textutil.FitCharsLimit(c.ContextTokens, outReserve)
 	if limit <= 0 {
 		return
 	}

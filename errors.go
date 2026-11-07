@@ -116,8 +116,11 @@ func httpStatus(err error) int {
 	return 0
 }
 
-// containsMarker 文本 marker 匹配。数字状态码用词边界匹配——"429" 不得命中
-// "failed after 1429ms" 之类的耗时文案。
+// containsMarker 文本 marker 匹配。数字状态码用词边界匹配——边界取「前后
+// 非字母数字」："429" 不得命中 "failed after 1429ms"（相邻数字），也不得命中
+// "upstream timeout after 400ms"/"failed after 429ms"（字母单位后缀，llm#78：
+// 此前边界只防相邻数字，"400ms" 的 "m" 照样放行——耗时文案被误判成确定性
+// 4xx/限流，前者直接放弃重试、后者白等限流退避）。
 func containsMarker(msg, marker string) bool {
 	if !isDigitToken(marker) {
 		return strings.Contains(msg, marker)
@@ -133,11 +136,18 @@ func containsMarker(msg, marker string) bool {
 		if i+len(marker) < len(msg) {
 			after = msg[i+len(marker)]
 		}
-		if !isDigitByte(before) && !isDigitByte(after) {
+		if !isAlnumByte(before) && !isAlnumByte(after) {
 			return true
 		}
 	}
 	return false
+}
+
+// isAlnumByte ASCII 字母或数字——数字状态码的词内成分（"400ms"/"a429b" 的
+// 字母与数字一样构成词内部，不是状态码边界；汉字等多字节首字节 ≥0x80 不在
+// 此列，"错误429限流" 仍按边界命中）。
+func isAlnumByte(b byte) bool {
+	return isDigitByte(b) || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func isDigitToken(s string) bool {
