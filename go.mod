@@ -7,8 +7,8 @@ require (
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/meguminnnnnnnnn/go-openai v0.1.6
 	github.com/oagentkit/textx v0.10.1
-	github.com/oekit/concurrency v0.28.3
-	github.com/oekit/logx v0.8.8
+	github.com/oekit/concurrency v0.28.4
+	github.com/oekit/logx v0.8.9
 	github.com/oekit/pkg v0.37.4
 )
 
