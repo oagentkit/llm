@@ -3,6 +3,7 @@ package wrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,16 @@ func seqResp(content, finishReason string, toolCalls int) *schema.Message {
 	}
 	for i := 0; i < toolCalls; i++ {
 		m.ToolCalls = append(m.ToolCalls, schema.ToolCall{ID: "t1", Function: schema.FunctionCall{Name: "x"}})
+	}
+	return m
+}
+
+// seqRespUsage 带 usage 的响应（llm#82 记账合并断言用）。
+func seqRespUsage(content, finishReason string, prompt, completion int) *schema.Message {
+	m := seqResp(content, finishReason, 0)
+	m.ResponseMeta.Usage = &schema.TokenUsage{
+		PromptTokens: prompt, CompletionTokens: completion,
+		TotalTokens: prompt + completion,
 	}
 	return m
 }
@@ -151,5 +162,119 @@ func TestContinueModelPassthroughNormal(t *testing.T) {
 	out, _ := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
 	if out.Content != "done" || inner.callCount() != 1 {
 		t.Fatal("正常结束不应触发续写")
+	}
+}
+
+// TestContinueModelDerivedDeadlineNotSwallowed（llm#77，锁 #69 修复的契约）：
+// 续写轮撞上内层派生 deadline（Client 的 AttemptTimeout、http.Client.Timeout
+// 等产生的 context.DeadlineExceeded）而父 ctx 仍存活时——ctx.Err()==nil，
+// 腰斩的半截输出不得以 (msg, nil) 的零错误形态当成功返回，必须携带触发
+// 错误上抛（消费方拿到静默残缺内容是评审结论/JSON 成品场景的 P1）。
+func TestContinueModelDerivedDeadlineNotSwallowed(t *testing.T) {
+	inner := &seqModel{
+		// 第二条 resp 仅占位（seqModel 的 errs 索引随 resps 钳制，需撑开长度）
+		resps: []*schema.Message{seqResp("partial-", "length", 0), seqResp("", "stop", 0)},
+		// 续写轮返回包装过的派生 deadline（外层 ctx 健康）
+		errs: []error{nil, fmt.Errorf("attempt timeout: %w", context.DeadlineExceeded)},
+	}
+	cm := NewContinueModel(inner, "R77", nil)
+	out, err := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
+	if err == nil {
+		t.Fatal("派生 deadline 必须以错误上抛——(半截, nil) 会把腰斩输出当完整品")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("错误链应保留底层 DeadlineExceeded: %v", err)
+	}
+	if out == nil || out.Content != "partial-" {
+		t.Fatalf("错误路径应同时携带半截输出供上层处置: %v", out)
+	}
+}
+
+// TestContinueModelParentCancelPropagates 父 ctx 取消：ctx.Err() 原样上抛
+// （调用方语义的失败不是「续写失败」，不得落入部分返回分支）。
+func TestContinueModelParentCancelPropagates(t *testing.T) {
+	inner := &seqModel{
+		// 第二条 resp 仅占位（seqModel 的 errs 索引随 resps 钳制，需撑开长度）
+		resps: []*schema.Message{seqResp("partial-", "length", 0), seqResp("", "stop", 0)},
+		errs:  []error{nil, context.Canceled},
+	}
+	cm := NewContinueModel(inner, "R77", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out, err := cm.Generate(ctx, []*schema.Message{bigTool(schema.User, 10)})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("父 ctx 取消应原样上抛: %v", err)
+	}
+	if out == nil || out.Content != "partial-" {
+		t.Fatalf("应同时携带半截输出: %v", out)
+	}
+}
+
+// TestContinueModelMergesUsageAcrossRounds（llm#82）：续写合并不得以末轮
+// meta 整体覆盖——首轮 usage 丢失会让按 ResponseMeta.Usage 记账的消费方
+// 只计末轮，成本/预算口径系统性低估。prompt 取首轮、completion 求和、
+// total 重算自洽、FinishReason 以末轮为准。
+func TestContinueModelMergesUsageAcrossRounds(t *testing.T) {
+	inner := &seqModel{resps: []*schema.Message{
+		seqRespUsage("part-", "length", 100, 500), // 首轮：输出大头
+		seqRespUsage("rest", "stop", 220, 80),     // 续写轮：prompt 含回传的部分输出
+	}}
+	cm := NewContinueModel(inner, "cost", nil)
+	out, err := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	u := out.ResponseMeta.Usage
+	if u.PromptTokens != 100 {
+		t.Fatalf("prompt 应取首轮（整段上下文按一份计）: %d", u.PromptTokens)
+	}
+	if u.CompletionTokens != 580 {
+		t.Fatalf("completion 应逐轮累加 500+80: %d", u.CompletionTokens)
+	}
+	if u.TotalTokens != 680 {
+		t.Fatalf("total 应重算为 prompt+completion: %d", u.TotalTokens)
+	}
+	if out.ResponseMeta.FinishReason != "stop" {
+		t.Fatalf("finish reason 以末轮为准: %q", out.ResponseMeta.FinishReason)
+	}
+}
+
+// TestContinueModelUsageAccumulatesThreeRounds 三轮续写的累加跨轮保持
+// （首轮 prompt 不被后续轮覆盖、completion 逐轮滚动求和）。
+func TestContinueModelUsageAccumulatesThreeRounds(t *testing.T) {
+	inner := &seqModel{resps: []*schema.Message{
+		seqRespUsage("a", "length", 100, 100),
+		seqRespUsage("b", "length", 150, 100),
+		seqRespUsage("c", "stop", 300, 50),
+	}}
+	cm := NewContinueModel(inner, "cost", nil)
+	out, err := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	u := out.ResponseMeta.Usage
+	if u.PromptTokens != 100 || u.CompletionTokens != 250 || u.TotalTokens != 350 {
+		t.Fatalf("三轮累加口径不符: prompt=%d completion=%d total=%d", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+	}
+}
+
+// TestContinueModelKeepsFirstUsageWhenLastMissing 末轮缺 usage（部分兼容端点
+// 不回传）：保住首轮 usage 不丢账，FinishReason 仍以末轮为准。
+func TestContinueModelKeepsFirstUsageWhenLastMissing(t *testing.T) {
+	inner := &seqModel{resps: []*schema.Message{
+		seqRespUsage("part-", "length", 100, 500),
+		seqResp("rest", "stop", 0), // 末轮无 usage
+	}}
+	cm := NewContinueModel(inner, "cost", nil)
+	out, err := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	u := out.ResponseMeta.Usage
+	if u == nil || u.PromptTokens != 100 || u.CompletionTokens != 500 {
+		t.Fatalf("末轮缺 usage 应保住首轮 usage: %+v", u)
+	}
+	if out.ResponseMeta.FinishReason != "stop" {
+		t.Fatalf("finish reason 以末轮为准: %q", out.ResponseMeta.FinishReason)
 	}
 }
