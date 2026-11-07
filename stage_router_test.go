@@ -91,6 +91,37 @@ func TestStageRouterUsedTokensSharedBudgetDedup(t *testing.T) {
 	}
 }
 
+// promLikeAccountant 模拟 Prometheus 风格自定义记账器：**值类型**实现 +
+// []string label 字段——动态类型不可比，旧实现以接口值做 map 键直接 panic（#81）。
+type promLikeAccountant struct {
+	labels []string
+	used   int
+}
+
+func (p promLikeAccountant) Add(int)        {} // 值接收者：本测试只读 Used，Add 空实现仅凑接口
+func (p promLikeAccountant) Used() int      { return p.used }
+func (p promLikeAccountant) Remaining() int { return 0 }
+
+func TestStageRouterUsedTokensIncomparableAccountant(t *testing.T) {
+	// #81：不可比值类型 TokenAccountant 经 BoundBudget 进路由——
+	// 修前 UsedTokens 在 seen[acc] 处 panic，修后不 panic 且去重正确。
+	calls := []string{}
+	acc := promLikeAccountant{labels: []string{"task", "planning"}, used: 40}
+	sr := NewStageRouter(&fakeGen{name: "def", calls: &calls, budget: acc})
+	sr.Use("R1", &fakeGen{name: "r1", calls: &calls, budget: acc})
+	sr.Use("R3", &fakeGen{name: "r3", calls: &calls, budget: acc})
+	// 同一记账器（等值）注入多条链：内容身份去重，只计一次
+	if got := sr.UsedTokens(); got != 40 {
+		t.Fatalf("不可比记账器应去重只计一次: got %d, want 40", got)
+	}
+	// 不同内容的值记账器互不去重，各计一次
+	other := promLikeAccountant{labels: []string{"task", "review"}, used: 15}
+	sr.Use("R4", &fakeGen{name: "r4", calls: &calls, budget: other})
+	if got := sr.UsedTokens(); got != 55 {
+		t.Fatalf("不同值记账器应各计一次: got %d, want 55", got)
+	}
+}
+
 func TestStageRouterJSONAndNilSafety(t *testing.T) {
 	calls := []string{}
 	sr := NewStageRouter(&fakeGen{name: "def", calls: &calls})
