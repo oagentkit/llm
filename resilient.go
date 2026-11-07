@@ -49,8 +49,9 @@ type BudgetInjector interface {
 }
 
 // BudgetHolder 可选接口：暴露 Generator 绑定的预算累计器。
-// 聚合方（StageRouter.UsedTokens）按其指针身份去重——各链共享同一 Budget 时
-// 逐链求和会按链数倍增。
+// 聚合方（StageRouter.UsedTokens）按记账器身份去重——指针实现按指针身份，
+// 值实现按内容（见 stage_router.go 的 accountantKey，#81）；
+// 各链共享同一 Budget 时逐链求和会按链数倍增。
 type BudgetHolder interface {
 	BoundBudget() TokenAccountant
 }

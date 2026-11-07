@@ -15,6 +15,8 @@ package llm
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -97,7 +99,7 @@ func (r *StageRouter) GenerateJSON(ctx context.Context, stage string, msgs []*sc
 func (r *StageRouter) RawModel() model.BaseChatModel { return r.def.RawModel() }
 
 // UsedTokens 全部链（缺省 + 已注册）的预算累计和——任务预算口径下各链共享
-// 同一 Budget 时即任务总消耗。暴露 BudgetHolder 的链按预算指针身份去重，
+// 同一 Budget 时即任务总消耗。暴露 BudgetHolder 的链按预算身份去重，
 // 避免共享预算被按链数倍增；未暴露的链退回逐链求和。
 func (r *StageRouter) UsedTokens() int {
 	r.mu.RLock()
@@ -108,7 +110,7 @@ func (r *StageRouter) UsedTokens() int {
 	}
 	r.mu.RUnlock()
 
-	seen := map[TokenAccountant]struct{}{}
+	seen := map[string]struct{}{}
 	total := 0
 	for _, g := range gens {
 		bh, ok := g.(BudgetHolder)
@@ -120,11 +122,30 @@ func (r *StageRouter) UsedTokens() int {
 		if acc == nil {
 			continue
 		}
-		if _, dup := seen[acc]; dup { // 共享同一预算只计一次
+		key := accountantKey(acc)
+		if _, dup := seen[key]; dup { // 共享同一预算只计一次
 			continue
 		}
-		seen[acc] = struct{}{}
+		seen[key] = struct{}{}
 		total += acc.Used()
 	}
 	return total
+}
+
+// accountantKey 计算 TokenAccountant 的去重键（#81）。
+//
+// 接口值直接做 map 键在动态类型不可比时（含 slice/map 字段的值类型，
+// 如带 []string label 的 Prometheus 值记账器）运行期 panic；
+// reflect.Value.Pointer 对非指针类动态类型同样 panic——故按动态类型分支：
+//   - 指针类（指针/chan/map/func/slice，覆盖 *Budget 等指针接收者实现）：
+//     类型 + 指针身份，同一实例多次传入只计一次；
+//   - 其余（值类型实现）：类型 + 内容——值类型没有指针身份，
+//     等值即视为同一记账器（等值多次传入只计一次）。
+func accountantKey(acc TokenAccountant) string {
+	switch rv := reflect.ValueOf(acc); rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return fmt.Sprintf("%T@%p", acc, acc)
+	default:
+		return fmt.Sprintf("%T@%#v", acc, acc)
+	}
 }
