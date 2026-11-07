@@ -2,6 +2,111 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.0] — 2026-11-07
+
+### 修复：流式观测/计量/端口面四连修（#80 #86 #87 #88）
+
+#80 流式 usage 观测 EOF 后不 Close 流：
+根因：wrap/fit.go observeUsage 只在错误路径手动 sr.Close()、正常 EOF 直接
+return，违反 eino「reader 必须恰好 Close 一次（EOF 后也必须 Close）」契约；
+内层流经 Copy 扇出（eino callbacks/ADK 分发形态）时子流不 Close 则父流
+closedNum 永不收口，副本链分片滞留。修法：EOF 分支补 sr.Close() 且先关
+内层再关外层（w.Close 的 EOF 可见性建立 happens-before，消费方可无竞态
+断言契约）；Close 不幂等（裸 Pipe 流 double-close 会 panic），故每条退出
+路径显式恰好关一次、不用 defer 兜底。修此问题时另暴露并修复同函数一处
+判反潜伏 bug：w.Send 返回值是 closed（true=消费端已关），原 !w.Send 在
+投递成功时退出且不关外层——只透传首块、外层永无 EOF，消费方第二帧起
+挂死；因无测试消费过 FitModel 流输出而潜伏至今。补 Copy(2) 扇出契约测试。
+（issue 中同类 agent/agentrun.go 一处在 agent 仓，需另行修复。）
+#86 usage 装饰器未实现 eino Checker：
+根因：FailoverModel/FitModel/ContinueModel/RateModel 均未实现
+components.Checker（IsCallbacksEnabled），compose 认为组件「不会自己发
+回调」，在节点外再注入一轮 OnStart/OnEnd——内层模型自燃回调 + 节点级
+注入双发，一次调用产出两条 usage 记录，预算/成本双计（RawModelWithFailover
+→ ReAct/compose 图内必现）。修法：单内层装饰器转发
+components.IsCallbacksEnabled(inner)；FailoverModel 链上任一链节启用即
+true（对齐 eino ADK failover proxy 模式）。补 compose 图真跑回归测试
+（未修复时实测 2 条记录：StubOpenAI 自燃 + FailoverModel 节点注入）。
+#87 DrainStreamUsage 只从 *schema.Message 帧提取 FinishReason：
+根因：eino-ext 流式真实帧是 *model.CallbackOutput（acl/openai 每 chunk
+sw.Send(&model.CallbackOutput{Message, Config, TokenUsage})），经
+OnEndWithStreamOutput 直达 DrainStreamUsage；#70 修复只在 Message 分支
+提取 finish，CallbackOutput 分支漏掉——最主流帧形态上 finish_reason 恒
+空，length 截断在流式观测面不可见。修法：CallbackOutput 分支补
+t.Message.ResponseMeta.FinishReason 提取，两分支经 finishReasonOf 单
+源化；补 CallbackOutput 帧形态断言（含 Message 帧对照组）。
+#88 port.Chain WithBreaker(nil) 静默清掉缺省熔断器：
+根因：WithBreaker 无 nil 防御，直接 c.breakers = b 覆盖 NewChain 装的
+缺省 NewBreakers，首次 Complete 在 c.breakers.Allow 空指针 panic；同构造
+器兄弟选项 WithClassifier 显式判 nil、WithBudget/WithTracker 使用点判
+nil，唯独 WithBreaker 两头不防。修法：nil = 未设置（保留缺省），与
+WithClassifier 同纪律（Breakers 无禁用态，本选项不存在「显式禁用」语
+义）；补 nil/非 nil 两路测试（非 nil 路用 WithConsecutiveFailures(1) 钉
+自定义熔断器真实接管）。
+
+### 修复(llm)：核心模型面五修——错误分类词边界/failover 尾链 nil/单次尝试限时/截断提升重裁/续写 usage 合并（#77-#85）
+
+## 摘要
+核心模型面五修 + 两项已修复核实补回归：错误分类数字状态码词边界（#78）、failover 尾链 nil 掩盖前链真实错误（#85）、Client 单次尝试独立限时（#84）、截断提升轮输入预算重算（#83）、ContinueModel 续写 meta usage 累加（#82）；#77/#79 核实为 #69/#63 已修复，本 PR 补回归测试锁死契约。
+close #77
+close #78
+close #79
+close #82
+close #83
+close #84
+close #85
+## #78 错误分类数字状态码词边界只防相邻数字
+- **根因**：`containsMarker` 对纯数字 marker 只做「前后字节非数字」匹配，`"400ms"`/`"429ms"` 的后边界是字母 `m` 照样命中——`"upstream timeout after 400ms"` 被判 400 确定性失败（单客户端直接放弃重试）、`"failed after 429ms"` 被判 429 限流（白等 5s 退避下限、误采信 Retry-After）。
+- **修法**：数字 marker 词边界收紧为「前后非字母数字」（新增 `isAlnumByte`；汉字等多字节首字节仍算边界，`错误429限流` 照常命中）。真状态码形态（空格/标点/括号边界）不受影响，与 #64 起 marker 收窄同方向。
+- **测试**：`TestClassifyLLMError` 补 `400ms`/`401ms`/`429ms`/`a429b` 误判用例与 `status 429,`/`(400)` 真形态用例。
+## #85 failover 链尾 nil 模型掩盖前链真实错误
+- **根因**：链尾 nil（typed-nil 装箱）时 Generate 经 `generateModel` 返回「链含 nil 模型」后因 `i==len-1` 直接上抛，倒数第二节的 429/超时被装配错误覆盖；Stream 同场景 `continue` 落空返回「failover 链为空」——同一故障两个文案且都不是真实根因。
+- **修法**：失败分账累计——真实模型错误以最新为准（沿旧语义），nil 链节装配错误（`errNilLink` 单源文案）只记录不覆盖；`chainExhaustedErr` 收口时两者 `errors.Join` 并列（真实错误在前），只有 nil 链节的链上抛装配错误，零链节构造才报「链为空」。Stream 的 nil 链节补 OnFailover 观测，消除与 Generate 的漂移。
+- **测试**：`TestFailoverTailNilKeepsPriorError`（两路径同口径保留 429 sentinel + nil 信息）、`TestFailoverAllNilChainErrorCopy`（全 nil 链两路径文案一致）。
+## #84 Client.Generate 单次尝试无独立限时
+- **根因**：`retryPolicy.attemptTimeout` 字段早已预留且注释写明设计动机，但 `Client.retryPolicy()` 从不填——单客户端路径 `attemptCtx` 原样透传，挂死 provider（TLS 黑洞、网关半开）只能靠外层 ctx 兜底，首次尝试吞掉全部时间预算后 `MaxRetries`/退避沦为摆设。
+- **修法**：`Client` 新增 `AttemptTimeout time.Duration`（0=不限，向后兼容），`retryPolicy()` 接线；每次物理尝试各自计时，不覆盖重试循环。doc 给出建议量级（60–120s）与最坏挂钟预算口径（≈ MaxRetries×AttemptTimeout + Σ退避）。
+- **测试**：`TestClientAttemptTimeoutLimitsEachAttempt`（两次尝试各 ~40ms 独立计时收口）、`TestClientAttemptTimeoutZeroKeepsPassthrough`（0=不限，唯一挂钟约束来自外层 ctx）。
+## #83 截断提升 MaxTokens×3/2 超出 fitInput 输出预留
+- **根因**：`fitInput` 按 1 倍 `MaxOutputTokens` 预留裁剪输入；`finish_reason=length` 的重试轮提升输出上限 ×3/2 却不重裁输入——输入贴近窗口时 1.5 倍输出 + 原输入 > 窗口，二次尝试以 context too long 收场，还被判成确定性失败、在降级链上白烧一次切换。
+- **修法**：`fitInput` 参数化为 `fitInputFor(outReserve)`（预算公式仍单源 `textutil.FitCharsLimit`），提升轮按新上限对已裁剪输入重算预算再裁一次（留痕）。
+- **测试**：`TestClientTruncatedBoostRefitsInput`（800 rune 输入首轮不裁（945 预算）、提升轮裁到 742 预算并留痕）。
+## #82 ContinueModel 续写合并以末轮 ResponseMeta 整体覆盖
+- **根因**：续写最多 3 轮、每轮真实付费，但 `merged.ResponseMeta = next.ResponseMeta` 整体替换——首轮（输出大头）的 usage 从最终消息消失，按 `ResponseMeta.Usage` 记账的消费方对「截断+续写」只计末轮，成本系统性低估，恰在长输出（成本最高）场景失真。
+- **修法**：`mergeContinueMeta`——FinishReason 以末轮为准；Usage 累加：prompt 取首轮（上下文按一份计）、completion 求和、total 重算 prompt+completion 保持自洽；末轮缺 usage 保住首轮不丢账；末轮无 meta 仍置 nil（防对无 meta 的模型反复续写）。
+- **测试**：`TestContinueModelMergesUsageAcrossRounds`、`TestContinueModelUsageAccumulatesThreeRounds`、`TestContinueModelKeepsFirstUsageWhenLastMissing`。
+## #77 续写派生超时吞错 —— 核实已修复 + 补回归测试
+- **核实**：issue 引用的 `if ctx.Err() != nil || errors.Is(...) { return msg, ctx.Err() }` 是 #69 修复前旧代码；v0.20.0 起为分裂分支——父 ctx 取消返回 `ctx.Err()`，内层派生 deadline（`errors.Is(err, Canceled/DeadlineExceeded)`、外层 ctx 健康）包装上抛，不再返回 `(腰斩输出, nil)`。修复于 PR #73（ecc91f5）。
+- **补测试**：wrap/continue_test.go 此前完全没有锁这两条分支——新增 `TestContinueModelDerivedDeadlineNotSwallowed`（派生 deadline 包装上抛且携带半截输出）、`TestContinueModelParentCancelPropagates`（父取消原样上抛）。
+## #79 Failover Generate typed-nil panic —— 核实已修复
+- **核实**：`generateModel` 自 #63（PR #72，01ae934）起改用 `isNilModel`（含 reflect typed-nil 判定），与 Stream/Resilient 单源；回归测试 `TestFailoverGenerateTypedNilSkipped` 在本分支复跑通过。issue 引用的「只判 `m == nil`」是修复前形态。
+## 行为变更/迁移点（汇总）
+- 数字带字母单位后缀的文案（`400ms` 等）不再命中状态码 marker——回到默认可重试。
+- 全 nil 链的 Stream 错误文案从「failover 链为空」改为「链含 nil 模型」；链尾 nil + 前链真实失败时错误为 Join 聚合（`errors.Is/As` 可同时命中）。
+- Client 配置 `AttemptTimeout` 后每次物理尝试独立限时（0 缺省行为不变）；GenerateJSON 直用 Client 时同样参与（Resilient 路径显式传 0，行为不变）。
+- 截断提升轮输入会被进一步裁剪（多一处留痕）。
+- 续写合并后的 usage 语义从「末轮整体覆盖」改为「首轮 prompt + 累加 completion」——记账数字上升是修正低估，非回归。
+## 验证
+`gofmt -l .` 空、`go vet ./...`、`go build ./...`、`go test ./...`（含 `-race`）本地全绿。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.9.0` | `v0.10.0` |
+| `github.com/oekit/concurrency` | `v0.25.1` | `v0.28.0` |
+| `github.com/oekit/logx` | `v0.8.3` | `v0.8.5` |
+| `github.com/oekit/pkg` | `v0.34.1` | `v0.37.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.20.0] — 2026-11-06
 
 ### 修复(wrap,obsx,usage)：provider deadline 上抛 / 流式 finish reason / 防重 doc 对齐（#69-#71）
