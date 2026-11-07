@@ -16,6 +16,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	einomodel "github.com/cloudwego/eino/components/model"
@@ -73,40 +74,65 @@ func (m *FailoverModel) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCalli
 }
 
 // Generate 按链序尝试；失败且 ctx 存活（非调用方取消/超时）时切下一个。
-// 全部失败上抛末个模型的错误——此前各模型的失败经 OnFailover 回调可见。
+// 全部失败上抛末个模型的错误；链尾为 nil 模型时前链真实错误不被装配错误
+// 掩盖——两者 errors.Join 并列上抛（llm#85，与 Stream 同口径）。此前各模型
+// 的失败经 OnFailover 回调可见。
 func (m *FailoverModel) Generate(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+	var lastRealErr, nilLinkErr error
 	for i, mm := range m.models {
 		resp, err := generateModel(ctx, mm, input, opts...)
 		if err == nil {
 			return resp, nil
 		}
-		if ctx.Err() != nil || i == len(m.models)-1 {
+		if ctx.Err() != nil {
 			return nil, err
 		}
-		m.notify(m.names[i], m.names[i+1], err.Error())
+		if isNilModel(mm) {
+			// nil 链节的装配错误只记录、不覆盖前链真实错误（llm#85）
+			if nilLinkErr == nil {
+				nilLinkErr = err
+			}
+		} else {
+			lastRealErr = err // 真实错误以最新为准（末个模型的错误收口）
+		}
+		if i < len(m.models)-1 {
+			m.notify(m.names[i], m.names[i+1], err.Error())
+		}
 	}
-	return nil, fmt.Errorf("llm: failover 链为空")
+	return nil, chainExhaustedErr(lastRealErr, nilLinkErr)
 }
 
-// Stream 与 Generate 同一降级语义（首块前失败才可切换；已在流中失败无法换模型重放）。
+// Stream 与 Generate 同一降级语义（首块前失败才可切换；已在流中失败无法换模型
+// 重放）。nil 链节与收口错误文案同 Generate（llm#85：此前同场景落入
+// 「failover 链为空」——同一故障两个文案，且都掩盖前链真实根因）。
 func (m *FailoverModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	var lastRealErr, nilLinkErr error
 	for i, mm := range m.models {
 		if isNilModel(mm) {
 			// 与 Generate 路径同契约（第十轮审计：Stream 裸调 nil panic，
 			// ReAct 流式主路径正是走这里）；typed-nil 一并防御（isNilModel
 			// 与 Resilient 共用）
+			if nilLinkErr == nil {
+				nilLinkErr = errNilLink()
+			}
+			if i < len(m.models)-1 {
+				m.notify(m.names[i], m.names[i+1], nilLinkErr.Error())
+			}
 			continue
 		}
 		sr, err := mm.Stream(ctx, input, opts...)
 		if err == nil {
 			return sr, nil
 		}
-		if ctx.Err() != nil || i == len(m.models)-1 {
+		if ctx.Err() != nil {
 			return nil, err
 		}
-		m.notify(m.names[i], m.names[i+1], err.Error())
+		lastRealErr = err
+		if i < len(m.models)-1 {
+			m.notify(m.names[i], m.names[i+1], err.Error())
+		}
 	}
-	return nil, fmt.Errorf("llm: failover 链为空")
+	return nil, chainExhaustedErr(lastRealErr, nilLinkErr)
 }
 
 // generateModel nil 模型防御（装配遗漏 fail-fast 于尝试时刻而非 panic）。
@@ -115,9 +141,28 @@ func (m *FailoverModel) Stream(ctx context.Context, input []*schema.Message, opt
 // 解引用 panic——「流式好使、非流式炸」的反直觉失效形态。
 func generateModel(ctx context.Context, m einomodel.BaseChatModel, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
 	if isNilModel(m) {
-		return nil, fmt.Errorf("llm: failover 链含 nil 模型")
+		return nil, errNilLink()
 	}
 	return m.Generate(ctx, input, opts...)
+}
+
+// errNilLink nil 链节的装配错误——Generate/Stream 同一文案（llm#85）。
+func errNilLink() error { return fmt.Errorf("llm: failover 链含 nil 模型") }
+
+// chainExhaustedErr 链走完仍无成功的收口错误（llm#85）：前链真实错误优先，
+// nil 链节的装配错误并列其后（errors.Join——不掩盖根因）；只有 nil 链节的
+// 链上抛装配错误本身；两者皆无（零链节构造形态）才报「链为空」。
+func chainExhaustedErr(lastRealErr, nilLinkErr error) error {
+	switch {
+	case lastRealErr != nil && nilLinkErr != nil:
+		return errors.Join(lastRealErr, nilLinkErr)
+	case lastRealErr != nil:
+		return lastRealErr
+	case nilLinkErr != nil:
+		return nilLinkErr
+	default:
+		return fmt.Errorf("llm: failover 链为空")
+	}
 }
 
 func (m *FailoverModel) notify(from, to, reason string) {
