@@ -2,6 +2,58 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.1] — 2026-11-07
+
+### 修复(stagerouter)：UsedTokens 去重键改指针身份——不可比 TokenAccountant 实现不再 panic（#81）
+
+根因：UsedTokens 以接口值做去重 map 键（seen := map[TokenAccountant]struct{}）。
+Go 规定接口键的动态类型不可比（含 slice/map 字段的值类型，如带 []string
+label 的 Prometheus 记账器）时 map 读写直接运行期 panic——文档又明确邀请
+自定义 TokenAccountant 实现，此类实现经 BudgetHolder.BoundBudget() 进路由
+即炸。
+修法：去重键改由 accountantKey 生成「类型 + 身份」字符串，按动态类型分支：
+- 指针类（指针/chan/map/func/slice，覆盖 *Budget 等指针接收者实现）：
+  %T@%p 即指针身份，同一实例多次传入只计一次；
+- 其余（值类型实现）：%T@%#v 内容身份——reflect.Value.Pointer 对 struct
+  等非指针类同样 panic（本机已验证），值类型没有指针身份，等值即视为
+  同一记账器。
+同步更新 BudgetHolder/UsedTokens 注释口径。共享 *Budget 的指针身份去重
+语义不变（原 TestStageRouterUsedTokensSharedBudgetDedup 继续通过）。
+测试：新增 TestStageRouterUsedTokensIncomparableAccountant——含 []string
+字段的不可比值类型 TokenAccountant 经 BoundBudget 注入 4 条链：已验证
+修前该用例在 seen[acc] 处 panic，修后不 panic、等值去重只计一次
+（40 而非 120）、不同值各计一次（55）。
+
+- 杂务(build)：补统一 Makefile——本地 ci 门禁与共享 CI 同口径（agentkit#138）
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/logx v0.8.6
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/logx` | `v0.8.5` | `v0.8.6` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.37.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.37.0` | `v0.37.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.21.0] — 2026-11-07
 
 ### 修复：流式观测/计量/端口面四连修（#80 #86 #87 #88）
