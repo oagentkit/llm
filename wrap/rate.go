@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/cloudwego/eino/components"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
@@ -22,6 +23,16 @@ type RateModel struct {
 }
 
 var _ einomodel.ToolCallingChatModel = (*RateModel)(nil)
+
+// IsCallbacksEnabled 实现 eino components.Checker（oagentkit/llm#86）：
+// 转发内层模型的判定。装饰器自身不发回调——回调全部由内层模型自燃；
+// 不透传时 compose 会在节点外再注入一轮 OnStart/OnEnd，一次调用产出
+// 两条 usage 记录（预算/成本双计）。
+func (m *RateModel) IsCallbacksEnabled() bool {
+	return components.IsCallbacksEnabled(m.BaseChatModel)
+}
+
+var _ components.Checker = (*RateModel)(nil)
 
 // NewRateModel 包装 inner；limiter 为 nil 时返回原对象（零开销直通）。
 func NewRateModel(inner einomodel.BaseChatModel, limiter llm.Waiter) einomodel.BaseChatModel {

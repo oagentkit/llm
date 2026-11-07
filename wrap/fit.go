@@ -26,6 +26,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/cloudwego/eino/components"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
@@ -268,6 +269,16 @@ type FitModel struct {
 
 var _ einomodel.ToolCallingChatModel = (*FitModel)(nil)
 
+// IsCallbacksEnabled 实现 eino components.Checker（oagentkit/llm#86）：
+// 转发内层模型的判定。装饰器自身不发回调——回调全部由内层模型自燃；
+// 不透传时 compose 认为组件「不会自己发回调」，在节点外再注入一轮
+// OnStart/OnEnd，一次调用产出两条 usage 记录（预算/成本双计）。
+func (f *FitModel) IsCallbacksEnabled() bool {
+	return components.IsCallbacksEnabled(f.BaseChatModel)
+}
+
+var _ components.Checker = (*FitModel)(nil)
+
 // NewFitModel 包装 inner；WindowTokens ≤0 时保持直通（不改行为）。
 func NewFitModel(inner einomodel.BaseChatModel, stage, modelName string, windowTokens, maxOutputTokens int, onFit func(string, FitResult)) *FitModel {
 	return &FitModel{
@@ -300,7 +311,7 @@ func (f *FitModel) Stream(ctx context.Context, input []*schema.Message, opts ...
 
 // observeUsage 流包装：携带 usage 的分片与本次实发 rune 数原子配对回灌
 // （eino-ext 流式恒 IncludeUsage，usage 尾帧物化为带 ResponseMeta 的 chunk）。
-// 消费方提前收流时透传关闭（Send 报错即消费者已 Close），防内层泄漏。
+// 消费方提前收流时透传关闭（Send 返回 closed 即消费者已 Close），防内层泄漏。
 func (f *FitModel) observeUsage(sr *schema.StreamReader[*schema.Message], sent int) *schema.StreamReader[*schema.Message] {
 	out, w := schema.Pipe[*schema.Message](1)
 	async.GoSafe(func() {
@@ -308,17 +319,32 @@ func (f *FitModel) observeUsage(sr *schema.StreamReader[*schema.Message], sent i
 			chunk, err := sr.Recv()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
+					// eino 契约：reader 必须恰好 Close 一次——**EOF 后也必须
+					// Close**（schema/stream.go：「the reader must be closed
+					// exactly once (whether the loop finishes normally or exits
+					// early)」）。此前正常 EOF 直接 return 不关内层：内层流若经
+					// Copy 扇出（eino callbacks/ADK 的分发形态），子流不 Close 则
+					// 父流 closedNum 永不收口，副本链分片滞留到所有消费者退出
+					// （oagentkit/llm#80）。先关内层再关外层（w.Close 的 EOF 语义
+					// 建立 happens-before）：消费方见到 EOF 即可确定内层已收口。
+					// 注：Close 不幂等（裸 Pipe 流 double-close 会 panic），故不用
+					// defer 兜底——每条退出路径恰好关一次。
+					sr.Close()
 					w.Close()
 					return
 				}
 				_ = w.Send(nil, err)
-				sr.Close() // eino 契约：Recv 出错不内部关流（第九轮审计）
+				sr.Close() // eino 契约：Recv 出错不内部关流（第九轮审计），须显式 Close
 				return
 			}
 			if chunk.ResponseMeta != nil && chunk.ResponseMeta.Usage != nil {
 				f.calibRecord(chunk.ResponseMeta.Usage.PromptTokens, sent)
 			}
-			if !w.Send(chunk, nil) {
+			// Send 返回 closed（true=消费端已提前 Close，false=投递成功）。
+			// 此前判反（!Send 在投递成功时 return 且不关外层 w）：只透传首块、
+			// 外层永无 EOF，消费方第二帧起挂死——因无测试消费过 FitModel 流
+			// 输出而潜伏（修 #80 补契约测试时暴露）。
+			if w.Send(chunk, nil) {
 				sr.Close()
 				return
 			}

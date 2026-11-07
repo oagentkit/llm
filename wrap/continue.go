@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cloudwego/eino/components"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -34,6 +35,16 @@ type ContinueModel struct {
 }
 
 var _ einomodel.ToolCallingChatModel = (*ContinueModel)(nil)
+
+// IsCallbacksEnabled 实现 eino components.Checker（oagentkit/llm#86）：
+// 转发内层模型的判定。装饰器自身不发回调——回调全部由内层模型自燃；
+// 不透传时 compose 会在节点外再注入一轮 OnStart/OnEnd，一次调用产出
+// 两条 usage 记录（预算/成本双计）。
+func (m *ContinueModel) IsCallbacksEnabled() bool {
+	return components.IsCallbacksEnabled(m.BaseChatModel)
+}
+
+var _ components.Checker = (*ContinueModel)(nil)
 
 // NewContinueModel 包装 inner；轮数上限 ≤0 时取缺省 3。
 func NewContinueModel(inner einomodel.BaseChatModel, stage string, onContinue func(string, int, int)) *ContinueModel {

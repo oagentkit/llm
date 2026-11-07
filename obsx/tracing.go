@@ -106,6 +106,11 @@ func NewTracingHandler(log logx.Logger, opt Options) callbacks.Handler {
 // （oagentkit/llm#70：此前只回 usage+名——流式 UsageRecord.FinishReason 恒空，
 // length 截断在流式观测面不可见，非流式同字段有真值两路不对称；末帧
 // ResponseMeta.FinishReason 通常带该值）。
+// 两种帧形态均提取 finish reason（oagentkit/llm#87）：eino-ext 流式真实帧是
+// *model.CallbackOutput（acl/openai 每 chunk sw.Send(&model.CallbackOutput{...})，
+// 经 OnEndWithStreamOutput 直达本函数）——#70 修复只覆盖 *schema.Message 帧，
+// CallbackOutput 分支漏提取 ⇒ 最主流帧形态上 finish_reason 恒空。两分支经
+// finishReasonOf 单源化，不再漂移。
 func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *model.TokenUsage, modelName string, finishReason string) {
 	for {
 		v, err := sr.Recv()
@@ -123,6 +128,9 @@ func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage 
 			if t.Config != nil && t.Config.Model != "" {
 				modelName = t.Config.Model
 			}
+			if fr := finishReasonOf(t.Message); fr != "" {
+				finishReason = fr
+			}
 		case *schema.Message:
 			if t == nil {
 				continue
@@ -130,11 +138,20 @@ func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage 
 			if u := TokenUsageOf(&model.CallbackOutput{Message: t}); u != nil {
 				usage = u
 			}
-			if t.ResponseMeta != nil && t.ResponseMeta.FinishReason != "" {
-				finishReason = t.ResponseMeta.FinishReason
+			if fr := finishReasonOf(t); fr != "" {
+				finishReason = fr
 			}
 		}
 	}
+}
+
+// finishReasonOf 提取消息携带的 finish reason（空串=未携带；nil 安全）。
+// DrainStreamUsage 的 CallbackOutput/Message 两分支共用（单源，防再漂移）。
+func finishReasonOf(msg *schema.Message) string {
+	if msg == nil || msg.ResponseMeta == nil {
+		return ""
+	}
+	return msg.ResponseMeta.FinishReason
 }
 
 // isModelCall 组件过滤：只认 ChatModel（eino 官方契约：ConvCallbackInput
