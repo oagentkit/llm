@@ -4,6 +4,11 @@
 
 ## [v0.21.2] — 2026-11-08
 
+- 杂务(deps)：依赖地板追到最新——concurrency v0.28.4 / logx v0.8.9（按本仓依赖取齐）
+
+oekit 基座 v0.28.4 / v0.8.9 落地，发版时刻地板时效门禁要求追平（matrix-tools#188 发版链）。
+兼容性实测：go build / go vet / go test -race -count=1 ./... 全绿，go mod tidy -diff 无漂移。
+
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.37.4
 
 pkg v0.37.4（httpjson NormalizeBaseURL scheme 大小写归一 #239 + refresh_versions）落地，地板同步追平（matrix-tools#188 发版链）。
