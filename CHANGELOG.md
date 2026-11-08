@@ -2,6 +2,36 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.4] — 2026-11-08
+
+### 新增：WithRateLimitRetry 模型级 429 退避装饰——RawModel 直驱路径弹性补位（#100）
+
+弹性栈（Resilient 降级链/熔断/预算 + Client.generateRetry 同模型重试）只
+覆盖 Generator 自家路径；RawModel() 返回的裸 eino 模型被 ReAct 直接驱动时
+429 一次失败即硬错——bianque 为此手搓完整 RetryModel 装饰器（552 次 429
+灭三专家的生产实证）。
+新增 WithRateLimitRetry(inner, opts...)（根包，与 breaker/限速装饰器同族）：
+- 只重试限流类失败（ClassifyLLMError→IsRateLimit），非限流错误原样快速
+  上抛；ctx 取消立即让位
+- 缺省曲线 = bianque 生产实证形态：5 次尝试、2s 基准、32s 封顶、0.25 单边
+  向上抖动；WithRetryAttempts/BaseDelay/MaxDelay/JitterRatio 可配
+- 退避曲线与 Retry-After 取舍与 Client.generateRetry 单源同化：
+  backoffDelayJittered/waitBackoffGap（抖动器可配，包级 retryJitter 行为不变）
+- ToolCallingChatModel 双形态：WithTools 派生沿用同一退避配置；
+  IsCallbacksEnabled 转发内层（llm#86 防 usage 双计）
+- 流一旦建立即原样交还（本层不触碰流生命周期）；装饰位指引：包在限速治理
+  层之外（重试重入重新排队，退避不占在飞配额）
+- 兼容层 llm/llm 镜像新符号（TestCompatParity 红转绿）
+兼容性取舍：纯 opt-in 装饰器，RawModel()/RawModelWithFailover() 默认行为
+不变（直驱用户的时延语义不受影响）；默认开启留待观察期后另议。
+close #100
+
+- 杂务(deps)：依赖地板追到最新——基座 v0.38.0/v0.29.0/v0.8.11 + 矩阵 tier0 新 tag（按本仓依赖取齐）
+
+发版时刻地板时效门禁要求追平。
+兼容性实测：go build / go vet / go test -race -count=1 ./... 全绿，go mod tidy -diff 无漂移。
+
+
 ## [v0.21.3] — 2026-11-08
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/logx v0.8.10
