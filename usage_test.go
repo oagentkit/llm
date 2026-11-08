@@ -142,6 +142,63 @@ func TestUsageHandlerClientAccountedSkips(t *testing.T) {
 	}
 }
 
+// TestUsageHandlerNestedScopeStartRefresh 嵌套作用域回归（llm#115）：handler
+// 挂在根/全局时，agent ReAct 循环第 N 次模型调用的 OnStart 必须刷新起点——
+// DurationMS 以最近一次调用起点起算，不得从根 OnStart 起算（随轮次单调虚涨：
+// 第 N 次 ≈ 累计时长）。装饰器链同一次调用双触发 OnStart（原「已有起点不
+// 覆盖」防重的目标场景）两次几乎同时，取后者无碍，一并钉住。
+// 时序余量：根起点起算 ≥ 70+35/140ms，最近起点 ≈ 35ms——断言 < 90ms 两侧
+// 均有充足余量，不因调度抖动翻红。
+func TestUsageHandlerNestedScopeStartRefresh(t *testing.T) {
+	var recs []UsageRecord
+	h := NewUsageHandler(func(r UsageRecord) { recs = append(recs, r) })
+	rootInfo := &callbacks.RunInfo{Type: "agent", Component: "agent"}
+	callInfo := &callbacks.RunInfo{Type: "OpenAI", Component: "ChatModel"}
+	usageOut := func() *model.CallbackOutput {
+		return &model.CallbackOutput{TokenUsage: &model.TokenUsage{PromptTokens: 1, TotalTokens: 1}}
+	}
+
+	// 根节点 OnStart（handler 挂全局时 eino 对每个节点都触发）
+	ctx := h.OnStart(context.Background(), rootInfo, nil)
+	time.Sleep(70 * time.Millisecond)
+
+	// 第 1 次模型调用：起点应刷新为本次 OnStart，DurationMS ≈ 35ms，
+	// 不得继承根起点（≥ 105ms）
+	mctx := h.OnStart(ctx, callInfo, nil)
+	time.Sleep(35 * time.Millisecond)
+	h.OnEnd(mctx, callInfo, usageOut())
+	if len(recs) != 1 {
+		t.Fatalf("应产 1 条记录, got %d", len(recs))
+	}
+	if recs[0].DurationMS >= 90 {
+		t.Fatalf("第 1 次调用 DurationMS=%d 从根起点起算（llm#115）", recs[0].DurationMS)
+	}
+
+	// 第 2 次模型调用（ReAct 循环下一轮，ctx 仍从根派生）：
+	// DurationMS 仍 ≈ 35ms，不得随轮次单调虚涨（从根起算 ≥ 140ms）
+	mctx2 := h.OnStart(ctx, callInfo, nil)
+	time.Sleep(35 * time.Millisecond)
+	h.OnEnd(mctx2, callInfo, usageOut())
+	if len(recs) != 2 {
+		t.Fatalf("应产 2 条记录, got %d", len(recs))
+	}
+	if recs[1].DurationMS >= 90 {
+		t.Fatalf("第 2 次调用 DurationMS=%d 单调虚涨（llm#115）", recs[1].DurationMS)
+	}
+
+	// 装饰器链同一次调用双触发 OnStart：取后者起点，时长仍按本次计
+	mctx3 := h.OnStart(ctx, callInfo, nil)
+	mctx3 = h.OnStart(mctx3, callInfo, nil)
+	time.Sleep(35 * time.Millisecond)
+	h.OnEnd(mctx3, callInfo, usageOut())
+	if len(recs) != 3 {
+		t.Fatalf("应产 3 条记录, got %d", len(recs))
+	}
+	if recs[2].DurationMS >= 90 {
+		t.Fatalf("双触发 OnStart 时长应按本次计, got %d", recs[2].DurationMS)
+	}
+}
+
 // TestUsageHandlerStreamBranch 流式分支回归（第十轮补覆盖）：usage 在中间
 // 帧、其后有无 usage 的尾帧——记录仍产出（last-non-nil）；排空异步进行，
 // handler 返回不被阻塞。

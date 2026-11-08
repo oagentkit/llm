@@ -102,13 +102,17 @@ func clientAccounted(ctx context.Context) bool {
 // 一笔 + Budget 扣一笔）——账单口径只看遥测出口则无碍，但两处都消费即翻倍。
 // ⚠ agentrun 场景：Config.OnUsage 与本 handler 记同一笔——**择一装配**
 // （两者没有共享防重标记，同时挂会双计）。
+// DurationMS 以最近一次 OnStart（即本次调用）起点起算（llm#115）：handler
+// 挂在根/全局时，agent 循环每轮调用各自计时，不继承外层作用域起点。
 func NewUsageHandler(onRecord Sink) callbacks.Handler {
 	return callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, _ *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
-			// 已有起点（嵌套包装二次触发 OnStart）不覆盖：保留最外层起点。
-			if _, ok := ctx.Value(startKey{}).(time.Time); ok {
-				return ctx
-			}
+			// 起点=最近一次调用的起点（llm#115）：handler 挂在根/全局时，agent
+			// ReAct 循环第 N 次模型调用的 OnStart 必须刷新起点，否则 DurationMS
+			// 从根 OnStart 起算、随轮次单调虚涨（token 面板耗时观测失真）。此前
+			// 的「已有起点不覆盖」防重是给装饰器链同一次调用双触发 OnStart 设计
+			// 的——该场景两次几乎同时，取后者（更贴近模型实际执行）无碍；与
+			// 跨调用嵌套不可同日而语，统一改为每次 OnStart 都起新起点。
 			return context.WithValue(ctx, startKey{}, time.Now())
 		}).
 		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
