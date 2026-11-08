@@ -265,11 +265,18 @@ func sameModelRetryDecision(chainFallback bool, hint RetryHint, err error) bool 
 // waitRetryGap 重试前退避等待：本地指数曲线 + 服务端 Retry-After 建议取舍。
 // ctx 取消原样上抛。
 func waitRetryGap(ctx context.Context, attempt int, pol retryPolicy, hint RetryHint) error {
-	delay := backoffDelay(attempt, pol.base, pol.ceil, hint.IsRateLimit)
+	return waitBackoffGap(ctx, attempt, pol.base, pol.ceil, hint.IsRateLimit, retryJitter)
+}
+
+// waitBackoffGap 退避等待唯一实现（Client.generateRetry 与模型级
+// RateLimitRetry 装饰器共用——曲线/Retry-After 取舍两处不再漂移，llm#100）：
+// 本地指数曲线（抖动器可配）+ 服务端建议钳制采信。ctx 取消原样上抛。
+func waitBackoffGap(ctx context.Context, attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) error {
+	delay := backoffDelayJittered(attempt, base, ceil, isRateLimit, jitter)
 	// 服务端建议优先（合理性钳制：≤5min 或短于本地曲线才采信——长限流交降级链）。
 	// 只在本次失败确为限流时采信：sink 不随尝试清除，429 之后的 500 若也读
 	// sink，会对非限流错误白等陈旧的整段限流窗口（第六轮审计）
-	if hint.IsRateLimit {
+	if isRateLimit {
 		if after := RetryAfterFrom(ctx); after > 0 {
 			delay = SelectRetryDelay(delay, after)
 		}
@@ -324,6 +331,13 @@ var retryJitter = mathx.NewUnstable(0.5)
 // 下限本身仍封顶 ceil——ceil<5s 的测试场景下最终钳到 ceil 的结果不变。
 // isRateLimit 由调用方携带 ClassifyLLMError 结果，免二次全串分类。
 func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.Duration {
+	return backoffDelayJittered(attempt, base, ceil, isRateLimit, retryJitter)
+}
+
+// backoffDelayJittered 退避曲线唯一实现（llm#100 起抖动器可配）：与
+// backoffDelay 同曲线同语义，抖动器由调用方注入——模型级 RateLimitRetry
+// 装饰器用自己档位的抖动比例，Client/Resilient 继续用包级 retryJitter。
+func backoffDelayJittered(attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) time.Duration {
 	minDelay := base
 	if isRateLimit {
 		minDelay = 5 * time.Second
@@ -336,8 +350,8 @@ func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.
 		delay = minDelay
 	}
 	// jitter 按当次 delay 幅度（base/2 基准在高 attempt 档抖动占比趋近于零，
-	// 打散效果失效——收口轮修）：单边向上 [delay, 1.5·delay)，永不早于计算退避
-	delay = retryJitter.UpwardDuration(delay)
+	// 打散效果失效——收口轮修）：单边向上 [delay, (1+ratio)·delay)，永不早于计算退避
+	delay = jitter.UpwardDuration(delay)
 	if delay > ceil {
 		delay = ceil
 	}

@@ -56,6 +56,10 @@ type (
 	PricedProvider = root.PricedProvider
 	// Provider 是根包 Provider 的类型别名（兼容层）。
 	Provider = root.Provider
+	// RateLimitRetryModel 是根包 RateLimitRetryModel 的类型别名（兼容层）。
+	RateLimitRetryModel = root.RateLimitRetryModel
+	// RateLimitRetryOption 是根包 RateLimitRetryOption 的类型别名（兼容层）。
+	RateLimitRetryOption = root.RateLimitRetryOption
 	// Resilient 是根包 Resilient 的类型别名（兼容层）。
 	Resilient = root.Resilient
 	// ResilientConfig 是根包 ResilientConfig 的类型别名（兼容层）。
@@ -166,8 +170,18 @@ var (
 	SuspiciousEmptyResult = root.SuspiciousEmptyResult
 	// WithCallCounter 是根包 WithCallCounter 的转发（兼容层）。
 	WithCallCounter = root.WithCallCounter
+	// WithRateLimitRetry 是根包 WithRateLimitRetry 的转发（兼容层）。
+	WithRateLimitRetry = root.WithRateLimitRetry
 	// WithRetryAfterSink 是根包 WithRetryAfterSink 的转发（兼容层）。
 	WithRetryAfterSink = root.WithRetryAfterSink
+	// WithRetryAttempts 是根包 WithRetryAttempts 的转发（兼容层）。
+	WithRetryAttempts = root.WithRetryAttempts
+	// WithRetryBaseDelay 是根包 WithRetryBaseDelay 的转发（兼容层）。
+	WithRetryBaseDelay = root.WithRetryBaseDelay
+	// WithRetryJitterRatio 是根包 WithRetryJitterRatio 的转发（兼容层）。
+	WithRetryJitterRatio = root.WithRetryJitterRatio
+	// WithRetryMaxDelay 是根包 WithRetryMaxDelay 的转发（兼容层）。
+	WithRetryMaxDelay = root.WithRetryMaxDelay
 	// WithUsageLabels 是根包 WithUsageLabels 的转发（兼容层）。
 	WithUsageLabels = root.WithUsageLabels
 )
