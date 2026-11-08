@@ -138,6 +138,59 @@ func TestContinueModelToolCallsNotContinued(t *testing.T) {
 	}
 }
 
+// TestContinueModelToolCallsInContinuationKept（llm#116）：首轮文本截断、
+// 续写轮发起工具调用（OpenAI 兼容端点上 tool_calls 与文本互斥，续写轮
+// content 常为空、动作全在 ToolCalls）——工具调用决策不得被静默丢弃，
+// 以续写轮为基座合并（ToolCalls 与 finish reason 保留、正文保住首轮前缀）。
+func TestContinueModelToolCallsInContinuationKept(t *testing.T) {
+	inner := &seqModel{resps: []*schema.Message{
+		seqResp("half answer", "length", 0),
+		seqResp("", "tool_calls", 2),
+	}}
+	cm := NewContinueModel(inner, "react", nil)
+	out, err := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("续写轮的工具调用必须保留（#116 此前被静默丢弃）: %v", out.ToolCalls)
+	}
+	if out.Content != "half answer" {
+		t.Fatalf("首轮截断前缀应保留，got %q", out.Content)
+	}
+	if out.ResponseMeta.FinishReason != "tool_calls" {
+		t.Fatalf("finish reason 应取续写轮（基座=续写轮）: %q", out.ResponseMeta.FinishReason)
+	}
+	if inner.callCount() != 2 {
+		t.Fatalf("应恰好 2 次调用，got %d", inner.callCount())
+	}
+}
+
+// TestContinueModelToolCallsTruncatedContinuationNotContinued 续写轮返回
+// 「带工具调用的截断」同样不再续写（「带 ToolCalls 不续写」纪律对续写轮
+// 同样生效，#116 合并基座切换后 isTruncated 恒 false 收口）。
+func TestContinueModelToolCallsTruncatedContinuationNotContinued(t *testing.T) {
+	inner := &seqModel{resps: []*schema.Message{
+		seqResp("half", "length", 0),
+		seqResp("", "length", 1), // 续写轮带工具调用且被截断：收口
+		seqResp("never", "stop", 0),
+	}}
+	cm := NewContinueModel(inner, "react", nil)
+	out, err := cm.Generate(context.Background(), []*schema.Message{bigTool(schema.User, 10)})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("续写轮的工具调用必须保留: %v", out.ToolCalls)
+	}
+	if out.Content != "half" {
+		t.Fatalf("正文应保留首轮前缀，got %q", out.Content)
+	}
+	if inner.callCount() != 2 {
+		t.Fatalf("带 ToolCalls 的续写轮之后不得再续写，实得 %d 次调用", inner.callCount())
+	}
+}
+
 func TestContinueModelErrorKeepsPartial(t *testing.T) {
 	inner := &seqModel{
 		resps: []*schema.Message{

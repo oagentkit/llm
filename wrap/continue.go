@@ -5,6 +5,9 @@
 //
 // 纪律：
 //   - 带 ToolCalls 的截断消息不续写（ReAct 中间步的续写会污染工具调用状态）；
+//   - 续写轮返回 ToolCalls 时以续写轮为基座合并——工具调用决策不得被静默
+//     丢弃（llm#116：绑定工具的模型在续写轮决定发起工具调用是合法决策，
+//     丢弃后 ReAct 循环把半截输出当最终答案）；
 //   - 续写失败返回已得部分（部分结果优于整体失败）；
 //   - Stream 直通不续写（当前无流式消费方，装饰器如实声明）。
 package wrap
@@ -80,6 +83,25 @@ func (m *ContinueModel) Generate(ctx context.Context, input []*schema.Message, o
 				return msg, fmt.Errorf("ctxrate: 续写被 provider 侧取消/限时打断（半截输出，不当完整品）: %w", err)
 			}
 			return msg, nil // 续写失败：返回已得部分
+		}
+		// 续写轮发起工具调用（llm#116）：以续写轮为基座合并——ToolCalls 与
+		// finish reason 保留（OpenAI 兼容端点上 tool_calls 与文本互斥，
+		// next.Content 常为空、动作全在 ToolCalls），正文保住首轮已得的截断
+		// 前缀。此前合并块恒以首轮为基座（ToolCalls 必为空），续写轮的
+		// ToolCalls 被静默丢弃：ReAct 循环收到纯文本 assistant 消息，工具
+		// 调用意图无声蒸发，agent 把半截输出当最终答案或重规划——静默走错。
+		// 带 ToolCalls 的合并结果 isTruncated 恒 false，续写循环随之收口
+		//（「带 ToolCalls 不续写」纪律对续写轮同样生效）。
+		if len(next.ToolCalls) > 0 {
+			merged := *next
+			merged.Content = msg.Content + next.Content
+			merged.ResponseMeta = mergeContinueMeta(msg.ResponseMeta, next.ResponseMeta)
+			added := len([]rune(next.Content))
+			msg = &merged
+			if m.OnContinue != nil {
+				m.OnContinue(m.Stage, round, added)
+			}
+			break
 		}
 		merged := *msg
 		merged.Content = msg.Content + next.Content
