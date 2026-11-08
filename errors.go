@@ -120,7 +120,10 @@ func httpStatus(err error) int {
 // 非字母数字」："429" 不得命中 "failed after 1429ms"（相邻数字），也不得命中
 // "upstream timeout after 400ms"/"failed after 429ms"（字母单位后缀，llm#78：
 // 此前边界只防相邻数字，"400ms" 的 "m" 照样放行——耗时文案被误判成确定性
-// 4xx/限流，前者直接放弃重试、后者白等限流退避）。
+// 4xx/限流，前者直接放弃重试、后者白等限流退避）。后边界进一步排除「小数点
+// +数字」形态（llm#114）："." 非字母数字，"timeout after 429.53ms" 的 "429"
+// 曾按边界成立 → 假阳性限流白等退避、"row 401.2" → 假阳性鉴权放弃重试；
+// 小数点后跟数字时是数字的一部分，不是边界（"429. " 句末句点仍按边界命中）。
 func containsMarker(msg, marker string) bool {
 	if !isDigitToken(marker) {
 		return strings.Contains(msg, marker)
@@ -137,10 +140,19 @@ func containsMarker(msg, marker string) bool {
 			after = msg[i+len(marker)]
 		}
 		if !isAlnumByte(before) && !isAlnumByte(after) {
+			if isDecimalContinuation(msg, i+len(marker)) {
+				continue
+			}
 			return true
 		}
 	}
 	return false
+}
+
+// isDecimalContinuation 判定 msg[pos] 起是否「小数点+数字」形态（llm#114）：
+// 数字 marker 后的小数点是小数的一部分（"429.53ms"/"401.2"），不是状态码边界。
+func isDecimalContinuation(msg string, pos int) bool {
+	return pos+1 < len(msg) && msg[pos] == '.' && isDigitByte(msg[pos+1])
 }
 
 // isAlnumByte ASCII 字母或数字——数字状态码的词内成分（"400ms"/"a429b" 的
