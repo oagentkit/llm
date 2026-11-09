@@ -118,12 +118,13 @@ func httpStatus(err error) int {
 
 // containsMarker 文本 marker 匹配。数字状态码用词边界匹配——边界取「前后
 // 非字母数字」："429" 不得命中 "failed after 1429ms"（相邻数字），也不得命中
-// "upstream timeout after 400ms"/"failed after 429ms"（字母单位后缀，llm#78：
-// 此前边界只防相邻数字，"400ms" 的 "m" 照样放行——耗时文案被误判成确定性
-// 4xx/限流，前者直接放弃重试、后者白等限流退避）。后边界进一步排除「小数点
-// +数字」形态（llm#114）："." 非字母数字，"timeout after 429.53ms" 的 "429"
+// "upstream timeout after 400ms"/"failed after 429ms"（字母单位后缀，llm#78）。
+// 后边界排除「小数点+数字」形态（llm#114）："timeout after 429.53ms" 的 "429"
 // 曾按边界成立 → 假阳性限流白等退避、"row 401.2" → 假阳性鉴权放弃重试；
 // 小数点后跟数字时是数字的一部分，不是边界（"429. " 句末句点仍按边界命中）。
+// 前侧对称排除「数字+小数点」形态（llm#125）：marker 是某小数的分数尾时
+// 同样不是独立状态码——"elapsed 12.429 total" 曾假阳性限流、"12.401" 曾
+// 假阳性确定性失败。
 func containsMarker(msg, marker string) bool {
 	if !isDigitToken(marker) {
 		return strings.Contains(msg, marker)
@@ -143,10 +144,20 @@ func containsMarker(msg, marker string) bool {
 			if isDecimalContinuation(msg, i+len(marker)) {
 				continue
 			}
+			if isDecimalTail(msg, i) {
+				continue
+			}
 			return true
 		}
 	}
 	return false
+}
+
+// isDecimalTail 判定 msg[pos-1] 处是否「数字+小数点」形态（llm#125，#114
+// 后侧排除的镜像侧）：marker 前是小数点、小数点前还是数字 ⇒ marker 是某个
+// 小数的分数尾（"elapsed 12.429 total" 的 "429"），不是独立状态码。
+func isDecimalTail(msg string, pos int) bool {
+	return pos >= 2 && msg[pos-1] == '.' && isDigitByte(msg[pos-2])
 }
 
 // isDecimalContinuation 判定 msg[pos] 起是否「小数点+数字」形态（llm#114）：
