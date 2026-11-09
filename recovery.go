@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -96,9 +97,50 @@ func isContextMarker(v string) bool {
 // 入口排队满，与限流不同类）。
 var busyProviderCodes = map[string]bool{"3008": true, "3009": true, "3010": true}
 
-// BusyAdmissionDelays busy 准入重试的两档退避（对标
+// BusyAdmissionDelays busy 准入重试的缺省两档退避（对标
 // START_PLAN_BUSY_MAIN_TURN_ADMISSION_RETRY_DELAYS_MS：1s/2s）。
+//
+// ⚠ llm#130 起本 var 只是**包初始化缺省的兼容镜像**：BusyAdmissionDelay 的
+// 运行时取值读 SetBusyAdmissionDelays 维护的原子快照（热路径无锁读，与替换
+// 写不共享内存——写读不再构成 data race，oagentkit/agentkit#167 的上游收口）。
+// 直写本 var（reassign / append 重分配 / 置 nil）**不再影响取值**；调优一律
+// 走 SetBusyAdmissionDelays。读本 var 只会看到初始化缺省，不反映已生效的表。
 var BusyAdmissionDelays = []time.Duration{time.Second, 2 * time.Second}
+
+// busyAdmissionTable busy 准入退避表的运行时快照（llm#130）：原子指针读，
+// 与 SetBusyAdmissionDelays 的原子替换构成无竞态读写对——包外直写导出 var
+// 的旧用法（oagentkit/agentkit 门面 setter 曾直写，agentkit#167 -race 实测）
+// 与热路径不再共享内存。快照持独立的防御性拷贝，与 var 连底层数组都不共享。
+var busyAdmissionTable atomic.Pointer[[]time.Duration]
+
+func init() {
+	defaultDelays := append([]time.Duration(nil), BusyAdmissionDelays...)
+	busyAdmissionTable.Store(&defaultDelays)
+}
+
+// ErrEmptyBusyAdmissionDelays 空退避表被拒绝（llm#130）：空表是配置事故而非
+// 「关闭退避」的表达（oagentkit/agentkit 门面 setter 的既有口径下沉；要表达
+// 「busy 时不等待」请用零时长档位，如 []time.Duration{0}）。
+var ErrEmptyBusyAdmissionDelays = errors.New("llm: BusyAdmissionDelays 不能为空表（关闭退避请用零时长档位）")
+
+// SetBusyAdmissionDelays 原子替换 busy 准入退避表（llm#130）。
+//
+// 并发语义：重试热路径的 BusyAdmissionDelay 无锁读，替换走原子指针写——
+// 并发写读不再构成 data race（此前门面 SetBusyAdmissionDelays 直写包级 var
+// 与 recovery.go 的运行时读实测 race，见 oagentkit/agentkit#167）。
+// 入参防御性拷贝：调用方此后对切片的任何改动（元素写/append 重分配）都不
+// 影响已生效的表。空表拒绝（ErrEmptyBusyAdmissionDelays）。
+//
+// ⚠ 此前直写导出 var BusyAdmissionDelays 的调用方（含 oagentkit/agentkit
+// 门面的 setter）必须迁移到本函数：热路径已改读原子快照，直写 var 不再生效。
+func SetBusyAdmissionDelays(delays []time.Duration) error {
+	if len(delays) == 0 {
+		return ErrEmptyBusyAdmissionDelays
+	}
+	cp := append([]time.Duration(nil), delays...)
+	busyAdmissionTable.Store(&cp)
+	return nil
+}
 
 // IsProviderBusyCode provider 业务码是否「繁忙」类（准入级退避重试的判定；
 // 耗尽后调用方应合成不可重试错误，别无限排队）。
@@ -106,13 +148,25 @@ func IsProviderBusyCode(code string) bool {
 	return busyProviderCodes[strings.TrimSpace(code)]
 }
 
-// BusyAdmissionDelay 按 retry 序号（0 起）取准入退避；越界取最后一档。
+// BusyAdmissionDelay 按 retry 序号（0 起）取准入退避；越界取最后一档；负序号
+// 取第一档；**空表返回 0（空表 = 不退避）**——llm#130：修复前空表会把下标
+// 算成 `len-1 == -1` 越界 panic（发生在 LLM 重试路径上），现任何输入都
+// fail-safe，不下标 -1、不 panic。
+//
+// 读的是 SetBusyAdmissionDelays 维护的原子快照（race-free）；导出的
+// BusyAdmissionDelays var 只是初始化缺省的兼容镜像，直写它不再影响本函数
+// 取值。快照正常入口拒绝空表，空表分支是取值函数对快照的自保护。
 func BusyAdmissionDelay(retry int) time.Duration {
-	if retry < 0 {
-		retry = 0
+	tbl := busyAdmissionTable.Load()
+	if tbl == nil || len(*tbl) == 0 {
+		return 0
 	}
-	if retry >= len(BusyAdmissionDelays) {
-		retry = len(BusyAdmissionDelays) - 1
+	i := retry
+	if i < 0 {
+		i = 0
 	}
-	return BusyAdmissionDelays[retry]
+	if i >= len(*tbl) {
+		i = len(*tbl) - 1
+	}
+	return (*tbl)[i]
 }

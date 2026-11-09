@@ -9,6 +9,8 @@ import (
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/oagentkit/llm/llmtest"
 )
 
 func TestWithUsageLabelsCopies(t *testing.T) {
@@ -230,4 +232,155 @@ func TestUsageHandlerStreamBranch(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("last-non-nil usage 应产出记录")
 	}
+}
+
+// callbacksStubModel 会触发 eino callbacks 的模型桩：Generate 内分发 handler
+// 的 OnStart/OnEnd（真实 provider 的 ChatModel 在 eino callbacks 装配下走同一
+// 分发路径——llm#132 复现用；不经过 InitCallbacks，直接以 handler 为分发目标）。
+type callbacksStubModel struct{ h callbacks.Handler }
+
+func (m *callbacksStubModel) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	ctx = m.h.OnStart(ctx, &callbacks.RunInfo{Type: "OpenAI", Name: "chat"}, nil)
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: "ok",
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+			Usage: &schema.TokenUsage{
+				PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
+			},
+		},
+	}
+	m.h.OnEnd(ctx, &callbacks.RunInfo{Type: "OpenAI", Name: "chat"}, &model.CallbackOutput{
+		Message: msg,
+		TokenUsage: &model.TokenUsage{
+			PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
+		},
+	})
+	return msg, nil
+}
+
+func (m *callbacksStubModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return nil, nil
+}
+
+// TestClientOnUsageDetailedDedup_Issue132 复现 llm#132：只配 OnUsageDetailed
+// （完整用量回调——需要 cached 的消费方用的出口）时，generateRetry 的「Client
+// 已记账」防重标记不打 ⇒ callbacks 侧 NewUsageHandler 对同一次物理调用再记
+// 一条 ⇒ 同一次调用两条用量（token/成本翻倍）。修复后 OnUsageDetailed 与
+// OnUsage 同属 Client 侧遥测出口、同样参与防重。
+func TestClientOnUsageDetailedDedup_Issue132(t *testing.T) {
+	var handlerRecs []UsageRecord
+	h := NewUsageHandler(func(r UsageRecord) { handlerRecs = append(handlerRecs, r) })
+
+	var detailed []UsageRecord
+	c := NewClient(&callbacksStubModel{h: h}, "gpt-4o", nil)
+	c.OnUsageDetailed = func(stage string, rec UsageRecord) { detailed = append(detailed, rec) }
+
+	if _, err := c.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if len(detailed) != 1 {
+		t.Fatalf("Client 侧 OnUsageDetailed 应记 1 条，got %d", len(detailed))
+	}
+	if len(handlerRecs) != 0 {
+		t.Fatalf("只配 OnUsageDetailed 时 callbacks 侧应被防重标记跳过（llm#132：修复前同一次调用双计），got %d", len(handlerRecs))
+	}
+	if handlerRecs != nil {
+		// 显式确认无记录（len 已断言，此处防 handler 误发空记录）。
+		t.Fatalf("callbacks 侧不应产出任何记录: %+v", handlerRecs)
+	}
+}
+
+// TestClientUsageOutletDedupMatrix_Issue132 防重矩阵钉约（llm#132）：
+//
+//	[A] 只配 OnUsage          → Client 侧 1 条，handler 跳过（既有契约）
+//	[B] 只配 OnUsageDetailed  → Client 侧 1 条，handler 跳过（llm#132 修复点）
+//	[C] 两个都配              → 两个 Client 侧出口各记 1 条（文档化「可同置」），handler 跳过
+//	[D] 都不配                → handler 记 1 条（callbacks 侧是唯一出口）
+func TestClientUsageOutletDedupMatrix_Issue132(t *testing.T) {
+	run := func(usePlain, useDetailed bool) (plainN, detailedN, handlerN int) {
+		h := NewUsageHandler(func(UsageRecord) { handlerN++ })
+
+		c := NewClient(&callbacksStubModel{h: h}, "gpt-4o", nil)
+		if usePlain {
+			c.OnUsage = func(stage string, p, comp int) { plainN++ }
+		}
+		if useDetailed {
+			c.OnUsageDetailed = func(stage string, rec UsageRecord) { detailedN++ }
+		}
+		if _, err := c.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	cases := []struct {
+		name                    string
+		plain, detailed         bool
+		wantPlain, wantDetailed int
+	}{
+		{"[A] 只配 OnUsage", true, false, 1, 0},
+		{"[B] 只配 OnUsageDetailed", false, true, 0, 1},
+		{"[C] 两个都配", true, true, 1, 1},
+		{"[D] 都不配", false, false, 0, 0},
+	}
+	for _, tc := range cases {
+		plainN, detailedN, handlerN := run(tc.plain, tc.detailed)
+		if plainN != tc.wantPlain || detailedN != tc.wantDetailed {
+			t.Errorf("%s: Client 侧 OnUsage=%d/OnUsageDetailed=%d，期望 %d/%d",
+				tc.name, plainN, detailedN, tc.wantPlain, tc.wantDetailed)
+		}
+		wantHandler := 1
+		if tc.plain || tc.detailed {
+			wantHandler = 0 // 任一 Client 侧遥测出口配置即打防重标记
+		}
+		if handlerN != wantHandler {
+			t.Errorf("%s: callbacks 侧 handler 应记 %d 条，got %d", tc.name, wantHandler, handlerN)
+		}
+	}
+}
+
+// TestGenerateRetryMarksAccountingForDetailed_Issue132 白盒钉约（llm#132）：
+// generateRetry 的防重标记判定必须覆盖 OnUsageDetailed 单独配置的形态——
+// 捕获传给模型的 ctx，断言标记已注入。
+func TestGenerateRetryMarksAccountingForDetailed_Issue132(t *testing.T) {
+	run := func(configure func(c *Client)) {
+		t.Helper()
+		cap := &ctxCaptureModel{Model: &llmtest.Model{Script: []llmtest.Resp{{Content: "ok"}}}}
+		c := NewClient(cap, "gpt-4o", nil)
+		configure(c)
+		if _, err := c.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+			t.Fatal(err)
+		}
+		if !clientAccounted(cap.lastCtx) {
+			t.Fatal("generateRetry 应打「Client 已记账」防重标记（OnUsageDetailed 也是遥测出口，llm#132）")
+		}
+	}
+	run(func(c *Client) { c.OnUsage = func(string, int, int) {} })
+	run(func(c *Client) { c.OnUsageDetailed = func(string, UsageRecord) {} })
+	run(func(c *Client) {
+		c.OnUsage = func(string, int, int) {}
+		c.OnUsageDetailed = func(string, UsageRecord) {}
+	})
+	// 反证：两个出口都不配（callbacks 侧是唯一记账出口）时不打标记——
+	// 否则 callbacks 侧用量遥测被静默吞掉。
+	cap := &ctxCaptureModel{Model: &llmtest.Model{Script: []llmtest.Resp{{Content: "ok"}}}}
+	c := NewClient(cap, "gpt-4o", nil)
+	if _, err := c.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if clientAccounted(cap.lastCtx) {
+		t.Fatal("无任何 Client 侧遥测出口时不应打防重标记（Budget 不算遥测出口的既有口径同理）")
+	}
+}
+
+// ctxCaptureModel 捕获最近一次 Generate 收到的 ctx（防重标记注入断言用）。
+type ctxCaptureModel struct {
+	*llmtest.Model
+	lastCtx context.Context
+}
+
+func (m *ctxCaptureModel) Generate(ctx context.Context, in []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.lastCtx = ctx
+	return m.Model.Generate(ctx, in, opts...)
 }

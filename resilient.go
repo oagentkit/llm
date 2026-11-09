@@ -63,8 +63,15 @@ func (c *Client) WithBudget(b TokenAccountant) Generator {
 	return &c2
 }
 
-// WithBudget Resilient 的预算注入：显式构造新实例（Resilient 含互斥字段不可浅拷贝）。
-// chain/breakers 共享原实例（熔断状态跨任务全局），Budget/Tracker 指向任务级。
+// WithBudget Resilient 的预算注入：显式构造新实例（Resilient 含互斥字段不可
+// 浅拷贝——`*r` 会触发 vet copylocks）。chain/breakers 共享原实例（熔断状态
+// 跨任务全局），Budget 指向任务级。
+//
+// ⚠ 字段清单必须与 Resilient 结构体保持同步（llm#131 教训：PriceTable 是在
+// OnFallback 之后加进结构体的，手工列举漏抄 ⇒ 任务级 fan-out 实例静默回落
+// 内建参考价，同一笔调用金额差 240 倍）。防回归护栏：
+// TestResilientWithBudgetCopiesAllFields_Issue131（反射逐字段比对，新增字段
+// 漏抄立即翻红）——改本函数前先跑它。
 func (r *Resilient) WithBudget(b TokenAccountant) Generator {
 	return &Resilient{
 		chain:      r.chain,
@@ -75,6 +82,7 @@ func (r *Resilient) WithBudget(b TokenAccountant) Generator {
 		Tracker:    r.Tracker,
 		OnUsage:    r.OnUsage,
 		OnFallback: r.OnFallback,
+		PriceTable: r.PriceTable,
 	}
 }
 

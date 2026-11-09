@@ -166,6 +166,12 @@ var (
 	RetryableLLMError = root.RetryableLLMError
 	// SelectRetryDelay 是根包 SelectRetryDelay 的转发（兼容层）。
 	SelectRetryDelay = root.SelectRetryDelay
+	// SetBusyAdmissionDelays 是根包 SetBusyAdmissionDelays 的转发（兼容层）。
+	//
+	// llm#130：原子替换 busy 准入退避表（热路径无锁读，写读不再构成 data
+	// race，oagentkit/agentkit#167 的上游收口）。空表拒绝
+	// ErrEmptyBusyAdmissionDelays；直写 BusyAdmissionDelays var 不再生效。
+	SetBusyAdmissionDelays = root.SetBusyAdmissionDelays
 	// SuspiciousEmptyResult 是根包 SuspiciousEmptyResult 的转发（兼容层）。
 	SuspiciousEmptyResult = root.SuspiciousEmptyResult
 	// WithCallCounter 是根包 WithCallCounter 的转发（兼容层）。
@@ -192,7 +198,13 @@ var (
 // 与根包共享底层数据，但根包侧的整体重新赋值不会传播到兼容层。
 var (
 	// BusyAdmissionDelays 是根包 BusyAdmissionDelays 的转发（兼容层）。
+	//
+	// llm#130：镜像的是根包**初始化缺省**的退避表——根包运行时取值已改读
+	// SetBusyAdmissionDelays 维护的原子快照，直写本 var（兼容层或根包侧）
+	// 均不影响根包 BusyAdmissionDelay 的取值；调优走 SetBusyAdmissionDelays。
 	BusyAdmissionDelays = root.BusyAdmissionDelays
+	// ErrEmptyBusyAdmissionDelays 是根包 ErrEmptyBusyAdmissionDelays 的转发（兼容层）。
+	ErrEmptyBusyAdmissionDelays = root.ErrEmptyBusyAdmissionDelays
 	// ErrPriceUnknown 是根包 ErrPriceUnknown 的转发（兼容层）。
 	ErrPriceUnknown = root.ErrPriceUnknown
 )
