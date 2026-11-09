@@ -57,6 +57,10 @@ type Client struct {
 	// 与 OnUsage 并行触发、两者可同置：OnUsage 保持旧签名不破坏；需要 cached 的
 	// 消费方（成本缓存折扣、命中率观测）用本回调。UsageRecord.CachedTokens 是
 	// 命中前缀缓存的 prompt token（DeepSeek/MiMo 等端点的 PromptTokenDetails）。
+	//
+	// 与 OnUsage 同属「Client 侧遥测出口」并**同样参与防重**（llm#132）：任一
+	// 出口配置时 generateRetry 打「Client 已记账」标记，NewUsageHandler 对同一
+	// 次物理调用跳过——只配本回调不会同 callbacks 侧双计。
 	OnUsageDetailed func(stage string, rec UsageRecord)
 	// Budget 任务 token 预算累计器（可 nil）。
 	Budget TokenAccountant
@@ -203,11 +207,12 @@ type retryPolicy struct {
 // 返回值 attempts 为实际执行的物理尝试数（错误文案「已重试 N 次」的真实计数，
 // 不再按 policy 上限谎报）。
 func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema.Message, pol retryPolicy) (*schema.Message, int, error) {
-	// Client 侧已配置 OnUsage 遥测出口时打标记：NewUsageHandler 检测到标记
-	// 跳过发射——同一次物理调用的 Generate 路径与 callbacks 路径只记一次遥测。
+	// Client 侧已配置任一遥测出口（OnUsage / OnUsageDetailed，llm#132 起两者
+	// 同口径）时打标记：NewUsageHandler 检测到标记跳过发射——同一次物理调用
+	// 的 Generate 路径与 callbacks 路径只记一次遥测。
 	// Budget 不算遥测出口：只配 Budget（未配 OnUsage/Tracker）时不打标记，
 	// 否则 callbacks 侧的用量遥测会被预算静默吞掉（第六轮审计）
-	if c.OnUsage != nil {
+	if c.OnUsage != nil || c.OnUsageDetailed != nil {
 		ctx = withClientAccounting(ctx)
 	}
 	// Retry-After sink（批次四十五）：传输层捕获 429 服务端建议，退避取舍时优先采信

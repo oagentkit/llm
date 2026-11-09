@@ -75,8 +75,9 @@ func WithCallCounter(ctx context.Context) context.Context {
 type startKey struct{}
 
 // clientAccountingCtxKey 标记「本次模型调用的 token 记账由 Client 侧负责」
-// （Client.OnUsage/Budget 已配置，generateRetry 打点）：NewUsageHandler 检测到
-// 标记跳过发射——同一物理调用的 Generate 路径与 callbacks 路径只记一次账。
+// （Client 配置了任一遥测出口 OnUsage/OnUsageDetailed 时 generateRetry 打点）：
+// NewUsageHandler 检测到标记跳过发射——同一物理调用的 Generate 路径与
+// callbacks 路径只记一次账。
 type clientAccountingCtxKey struct{}
 
 func withClientAccounting(ctx context.Context) context.Context {
@@ -95,11 +96,12 @@ func clientAccounted(ctx context.Context) bool {
 // OnEnd 的 handler 在开流（agentrun v0.10.32 起默认）下一条记录都不产生，
 // 静默失明。流式分支消费框架给的副本流取末个非 nil usage，末帧即汇总帧）。
 // 无 TokenUsage、无 RunInfo 的调用静默跳过；Labels 缺省不阻断采集。
-// 防重：Client 自身配置了 OnUsage（遥测出口）时（Client 记账标记已在 ctx），
-// 本 handler 对同一次物理调用自动跳过——两侧不会双倍记账。⚠ Budget **不在
-// 防重面**（client.go 同款口径）：Budget 是预算扣减不是遥测出口、不打标记，
-// OnUsage + Budget + 本 handler 三件套同时装配会把同一笔用量计两处（handler
-// 一笔 + Budget 扣一笔）——账单口径只看遥测出口则无碍，但两处都消费即翻倍。
+// 防重：Client 自身配置了任一遥测出口（OnUsage / OnUsageDetailed，llm#132 起
+// 两者同口径参与防重）时（Client 记账标记已在 ctx），本 handler 对同一次物理
+// 调用自动跳过——两侧不会双倍记账。⚠ Budget **不在防重面**（client.go 同款
+// 口径）：Budget 是预算扣减不是遥测出口、不打标记，OnUsage + Budget + 本
+// handler 三件套同时装配会把同一笔用量计两处（handler 一笔 + Budget 扣一笔）
+// ——账单口径只看遥测出口则无碍，但两处都消费即翻倍。
 // ⚠ agentrun 场景：Config.OnUsage 与本 handler 记同一笔——**择一装配**
 // （两者没有共享防重标记，同时挂会双计）。
 // DurationMS 以最近一次 OnStart（即本次调用）起点起算（llm#115）：handler
@@ -171,7 +173,8 @@ func recordFromUsage(ctx context.Context, info *callbacks.RunInfo, usage *model.
 // usageRecordFrom 从 OnEnd 上下文与回调输出提取用量记录。
 // ok=false 表示应静默跳过（Client 已记账 / 无 RunInfo / 无真实用量）。
 func usageRecordFrom(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) (UsageRecord, bool) {
-	// Client 侧已记账（OnUsage/Budget 配置时 generateRetry 打点）→ 跳过。
+	// Client 侧已记账（任一遥测出口 OnUsage/OnUsageDetailed 配置时
+	// generateRetry 打点，llm#132）→ 跳过。
 	if clientAccounted(ctx) {
 		return UsageRecord{}, false
 	}
