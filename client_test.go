@@ -55,6 +55,11 @@ func TestClassifyLLMError(t *testing.T) {
 		// 重试）；小数点后跟数字时是数字的一部分，不是边界。
 		{errors.New("request timeout after 429.53ms"), true, false, false},
 		{errors.New("parse row 401.2 malformed"), true, false, false},
+		// 前侧镜像（llm#125）：marker 是某小数的分数尾——"." 前是数字，
+		// marker 是数字的一部分，不是独立状态码。"elapsed 12.429 total" 曾
+		// 假阳性限流（白等退避）、"12.401" 假阳性确定性失败（放弃重试）。
+		{errors.New("elapsed 12.429 total"), true, false, false},
+		{errors.New("elapsed 12.401 total"), true, false, false},
 		// 句末句点（小数点后无数字）仍是边界：真状态码形态不受影响
 		{errors.New("gateway error 429. retry later"), true, true, false},
 		// 真状态码形态（空格/标点/括号边界）仍命中
