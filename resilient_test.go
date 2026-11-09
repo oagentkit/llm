@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -584,5 +585,111 @@ func TestResilientGenerateJSONSameModelTransientRetry(t *testing.T) {
 	}
 	if p2.ModelValue.(*llmtest.Model).Calls != 0 {
 		t.Fatal("不应切换备选模型")
+	}
+}
+
+// ---------- WithBudget 预算注入（llm#131） ----------
+
+// TestResilientWithBudgetKeepsPriceTable_Issue131 复现 llm#131：WithBudget
+// 逐字段复制漏掉 PriceTable ⇒ 任务级 fan-out 实例静默回落内建参考价（同一笔
+// 调用金额差 240 倍）。契约价经任务级实例（WithBudget 注入预算）必须与直用
+// 原实例同口径生效。
+func TestResilientWithBudgetKeepsPriceTable_Issue131(t *testing.T) {
+	// 契约价：1M prompt = 1000 USD，1M completion = 2000 USD（远高于任何
+	// 内建参考价，便于一眼看出走的是哪张表）。覆盖键 = Provider.ModelName()。
+	custom := NewPriceTable(map[string]Price{
+		"contract-model": {InputPerM: 1000, OutputPerM: 2000},
+	})
+	// 显式给价（CostPer1KTokens）置零：providerPrice 的优先级里显式价压过
+	// 查表——置零才能强制走 PriceTable 查价路径。
+	p := &llmtest.Provider{
+		Label: "contract",
+		ModelValue: &llmtest.Model{
+			Script:     []llmtest.Resp{{Content: "ok", Prompt: 1_000_000, Completion: 1_000_000}},
+			RepeatLast: true,
+		},
+		CtxTokens: 128_000, MaxOut: 4096,
+	}
+
+	// [1] 直用原实例：契约价生效 ⇒ 1M×1000/1e6 + 1M×2000/1e6 = 3000 USD。
+	r := newResilient(t, p)
+	tracker1 := NewCostTracker()
+	r.Tracker = tracker1
+	r.PriceTable = custom
+	if _, err := r.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+		t.Fatal(err)
+	}
+	s1 := tracker1.Summary()["contract-model"]
+	if s1.TotalCostUSD != 3000 {
+		t.Fatalf("[1] 直用原实例应按契约价记 3000 USD，got %v（unpriced=%d）",
+			s1.TotalCostUSD, s1.UnpricedCalls)
+	}
+
+	// [2] 任务级 fan-out 形态：经 WithBudget 注入预算——价表必须同样生效。
+	tracker2 := NewCostTracker()
+	r2 := newResilient(t, p)
+	r2.Tracker = tracker2
+	r2.PriceTable = custom
+	taskGen := r2.WithBudget(NewBudget(10_000_000))
+	g2, ok := taskGen.(*Resilient)
+	if !ok {
+		t.Fatalf("WithBudget 应返回 *Resilient，got %T", taskGen)
+	}
+	if g2.PriceTable != custom {
+		t.Fatalf("[2] WithBudget 复制实例必须保留 PriceTable（指针同一）——llm#131")
+	}
+	if _, err := taskGen.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+		t.Fatal(err)
+	}
+	s2 := tracker2.Summary()["contract-model"]
+	if s2.TotalCostUSD != 3000 {
+		t.Fatalf("[2] 经 WithBudget 注入后应按契约价记 3000 USD（与 [1] 同口径），got %v（unpriced=%d）",
+			s2.TotalCostUSD, s2.UnpricedCalls)
+	}
+}
+
+// TestResilientWithBudgetCopiesAllFields_Issue131 防漏抄护栏（llm#131）：
+// WithBudget 的显式构造必须覆盖除「任务级隔离字段 + 互斥/瞬态字段」外的
+// 全部字段——Resilient 再新增字段而 WithBudget 漏抄时本测试立即翻红，
+// 不依赖逐字段手写断言（本次漏抄的直接原因就是手工列举字段）。
+func TestResilientWithBudgetCopiesAllFields_Issue131(t *testing.T) {
+	custom := NewPriceTable(map[string]Price{"contract-model": {InputPerM: 1}})
+	onUsage := func(model, stage string, prompt, completion int) {}
+	onFallback := func(from, to, stage, reason string) {}
+	r := newResilient(t, newFakeProvider("contract", llmtest.Resp{Content: "ok"}))
+	r.Budget = NewBudget(123)
+	r.Limiter = nil
+	r.Tracker = NewCostTracker()
+	r.PriceTable = custom
+	r.OnUsage = onUsage
+	r.OnFallback = onFallback
+
+	g := r.WithBudget(NewBudget(456)).(*Resilient)
+
+	// 豁免清单：Budget 按任务隔离（WithBudget 的职责），mu/lastModel 是
+	// 运行期互斥/瞬态状态（新实例从零开始），不参与复制。
+	exempt := map[string]bool{"Budget": true, "mu": true, "lastModel": true}
+
+	sv, dv := reflect.ValueOf(r).Elem(), reflect.ValueOf(g).Elem()
+	typ := sv.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if exempt[f.Name] {
+			continue
+		}
+		src, dst := sv.Field(i), dv.Field(i)
+		// Func 反射不能 Equal（非 nil 函数值 Equal 会 panic），按代码指针比对。
+		var equal bool
+		if src.Kind() == reflect.Func {
+			equal = src.Pointer() == dst.Pointer()
+		} else {
+			equal = src.Equal(dst)
+		}
+		if !equal {
+			t.Errorf("WithBudget 漏抄字段 %s.%s（llm#131 形态）", typ.Name(), f.Name)
+		}
+	}
+	if g.Budget == r.Budget {
+		t.Fatal("Budget 应指向任务级新预算（WithBudget 的职责），不应共享原实例")
 	}
 }
