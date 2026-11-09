@@ -9,6 +9,8 @@
 后侧排除（#114）的镜像侧：marker 前是「数字+小数点」时 marker 是小数
 的分数尾，不是独立状态码。isDecimalTail 与 isDecimalContinuation 对称。
 
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.41.0
+
 ## [v0.21.6] — 2026-11-09
 
 ### 修复(wrap)：ContinueModel 续写轮返回 ToolCalls 以续写轮为基座合并，工具调用决策不再静默丢弃（#116）
