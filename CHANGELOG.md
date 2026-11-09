@@ -2,11 +2,67 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.6] — 2026-11-09
+
+### 修复(wrap)：ContinueModel 续写轮返回 ToolCalls 以续写轮为基座合并，工具调用决策不再静默丢弃（#116）
+
+- a3e1465
+
+### 修复：llm 第三轮 issue 清零（#114 #115）
+
+* fix(errors): 数字 marker 词边界排除「小数点+数字」——"429.5ms" 不再假阳性限流白等退避（#114）
+* fix(usage): OnStart 起点改为最近一次调用起点——嵌套作用域 DurationMS 不再从根起点单调虚涨（#115）
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.40.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.39.0` | `v0.40.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.5
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.10.4` | `v0.10.5` |
+| `github.com/oekit/concurrency` | `v0.30.1` | `v0.31.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.4
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.10.3` | `v0.10.4` |
+| `github.com/oekit/concurrency` | `v0.29.0` | `v0.30.1` |
+| `github.com/oekit/logx` | `v0.8.11` | `v0.8.12` |
+| `github.com/oekit/pkg` | `v0.38.0` | `v0.39.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.21.5] — 2026-11-08
 
-### 依赖地板：oekit 基座追平——pkg v0.38.0 / logx v0.8.11 / concurrency v0.29.0
-
-oekit BOM v0.2.11 兼容地板门禁（oekit#163）对齐轮；无代码变更。
+- 与 v0.21.4 相比无代码差异（版本号/打包变更）
 
 ## [v0.21.4] — 2026-11-08
 
