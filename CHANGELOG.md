@@ -2,6 +2,13 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.7] — 2026-11-09
+
+### 修复(errors)：containsMarker 前侧小数排除——"12.429" 分数尾不再假阳性限流/确定性失败（#125）
+
+后侧排除（#114）的镜像侧：marker 前是「数字+小数点」时 marker 是小数
+的分数尾，不是独立状态码。isDecimalTail 与 isDecimalContinuation 对称。
+
 ## [v0.21.6] — 2026-11-09
 
 ### 修复(wrap)：ContinueModel 续写轮返回 ToolCalls 以续写轮为基座合并，工具调用决策不再静默丢弃（#116）
