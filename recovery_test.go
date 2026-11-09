@@ -168,7 +168,7 @@ func TestSetBusyAdmissionDelays_Issue130(t *testing.T) {
 
 	// 防御性拷贝：setter 返回后改写入参元素/追加，已生效的表不受影响。
 	tbl[0] = 99 * time.Second
-	tbl = append(tbl, 55*time.Second)
+	_ = append(tbl, 55*time.Second) // 追加只作用于入参侧（弃返回值；linter：赋回未再读 = ineffectual）
 	if got := BusyAdmissionDelay(0); got != 3*time.Second {
 		t.Fatalf("入参元素改写不应影响已生效的表，got %v", got)
 	}
