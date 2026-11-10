@@ -32,8 +32,8 @@ type OpenAIProviderConfig struct {
 	BaseURL         string
 	APIKey          string
 	Model           string
-	ContextTokens   int           // 模型上下文窗口（默认 128k）
-	MaxOutputTokens int           // 单次输出上限（默认从窗口派生）
+	ContextTokens   int // 模型上下文窗口（默认 128k）
+	MaxOutputTokens int // 单次输出上限（默认从窗口派生）
 	// Timeout 请求超时（默认 60s）。**双层语义**（llm#143）：
 	//   - HTTP 层：未注入 HTTPClient 时传给下游 ChatModelConfig；注入后由
 	//     注入的 Client 完全接管，本字段对 HTTP 层无效；

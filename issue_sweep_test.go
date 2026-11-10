@@ -246,9 +246,9 @@ func (m *maxTokensRecorder) Generate(ctx context.Context, in []*schema.Message, 
 // 一次」误读成「提升后仍截断」。
 func TestGenerateRetryBoostStickyAcrossTransientRetries_Issue142(t *testing.T) {
 	rm := &maxTokensRecorder{Model: llmtest.Model{Script: []llmtest.Resp{
-		{FinishReason: "length"},                       // 截断 → 提升 1.5×
-		{Err: errors.New("llm: upstream 503")},         // 提升轮撞瞬态失败（可重试）
-		{Content: "ok"},                                // 续命重试轮成功
+		{FinishReason: "length"},               // 截断 → 提升 1.5×
+		{Err: errors.New("llm: upstream 503")}, // 提升轮撞瞬态失败（可重试）
+		{Content: "ok"},                        // 续命重试轮成功
 	}}}
 	c := NewClient(rm, "m", nil)
 	c.MaxOutputTokens = 100
