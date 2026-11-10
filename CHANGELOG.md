@@ -2,6 +2,67 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.9] — 2026-11-11
+
+### 修复(client,resilient,openai,port,obsx,provider)：七单清零——免费双口径、估算漏计、nil 链元素、熔断记账口径、boost 粘性、链层超时、ErrKey（#138-#144）
+
+* fix(client,resilient,openai,port,obsx,provider): 七单清零——免费双口径、估算漏计、nil 链元素、熔断记账口径、boost 粘性、链层超时、ErrKey（#138 #139 #140 #141 #142 #143 #144）
+- #138 provider.CostPer1KTokens 契约自破收口：文档删掉「0 表示不计费」，
+  「免费」唯一合法表达 = PricedProvider 返回 (Price{}, true)（零价也是
+  显式定价，不回落价表），测试钉死三路优先级与端到端免费记账
+- #139 无 usage 估算漏计：estimateMsgTokens 计入 ToolCalls（工具名+参数
+  JSON）与三组多模态文本部件，口径对齐 textx/compact 的 msgTokens——
+  大入参工具调用不再系统性低估、预算短路恢复有效
+- #140 NewResilient 构造期逐元素 nil/typed-nil fail-fast（queue#71 同款
+  纪律），错误文案带链上序号——不再把 panic 留给调用方 goroutine
+- #141 port.Chain.attempt 熔断记账对齐 Resilient：一次 Allow 放行（含 N
+  次物理重试）只在收口报一次 Failure——WithConsecutiveFailures(3) 不再
+  被单个逻辑请求整体烧穿
+- #142 截断提升粘性：boost 记在「当前生效参数」上，提升轮撞瞬态失败后续
+  命重试轮保持提升上限——不再静默退回原上限再截断、被上层误判「提升后
+  仍截断」而放弃；提升轮真的再截断才止损
+- #143 注入 HTTPClient 后 AttemptTimeout() 恒 0：超时归注入方 own，
+  Resilient 链不再叠加 per-attempt 截止——「本仓不再叠加自己的 Timeout」
+  对 HTTP 层与链层同时成立
+- #144 llm.call.error 错误字段走 logx.ErrKey（"err"），不再手写 "error"
+  字面量——两矩阵落同一 Loki/ES，查询侧不用 OR 双写
+range-over-int（Go 1.22）用于两处重试循环；测试 8 条回归用例按 issue 号
+命名，回归时按号检索。
+* style: gofmt（issue_sweep_test.go 结构体字面量对齐、openai.go 注释对齐）
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.32.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.31.2` | `v0.32.0` |
+| `github.com/oekit/logx` | `v0.9.1` | `v0.9.2` |
+| `github.com/oekit/pkg` | `v0.41.1` | `v0.42.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.7
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.10.6` | `v0.10.7` |
+| `github.com/oekit/concurrency` | `v0.31.1` | `v0.31.2` |
+| `github.com/oekit/logx` | `v0.9.0` | `v0.9.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.21.8] — 2026-11-10
 
 ### 修复(recovery,resilient,client)：busy 退避表空表 panic、WithBudget 漏抄价表、OnUsageDetailed 防重缺口（#130 #131 #132）
@@ -154,20 +215,6 @@ close #100
 
 
 ## [v0.21.3] — 2026-11-08
-
-- 杂务(deps)：依赖地板追到最新——github.com/oekit/logx v0.8.10
-
-| 依赖 | 现地板 | 抬到 |
-|---|---|---|
-| `github.com/oekit/logx` | `v0.8.9` | `v0.8.10` |
-## 为什么
-矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
-（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
-oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
-## 兼容性实测
-本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
-与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
-只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
 
 - 杂务(deps)：依赖地板追平 oekit BOM v0.2.9——pkg v0.37.4 / logx v0.8.10 / concurrency v0.28.4
 
@@ -447,21 +494,6 @@ Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
 |---|---|---|
 | `github.com/oekit/concurrency` | `v0.24.0` | `v0.25.1` |
 | `github.com/oekit/logx` | `v0.8.2` | `v0.8.3` |
-## 为什么
-矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
-（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
-oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
-## 兼容性实测
-本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
-与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
-只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
-Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
-
-- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.8.0
-
-| 依赖 | 现地板 | 抬到 |
-|---|---|---|
-| `github.com/oagentkit/textx` | `v0.7.2` | `v0.8.0` |
 ## 为什么
 矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
 （= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
@@ -959,20 +991,6 @@ $ go test -count=1 ./...         ok（5 个包）
 $ go test -count=1 -race ./...   ok（5 个包）
 ```
 关联：oagentkit/llm#26
-
-- 文档(changelog)：按新生成器规则重生成 CHANGELOG.md
-
-生成器修复（oagentkit/matrix-tools#43）落地：
-① `[round-N] ` 前缀被剥离 → conventional commit 解析不再失效，
-   **commit body 保留**（此前整段被丢弃，发布说明只剩标题）；
-② 非 conventional 提交也保留 body；
-③ `--check` 识别「待发版段」（预写了但还没打 tag 的那段）。
-本 PR 恢复的是**本就在 commit body 里**的正文（迁移步骤、代码块、
-判据锚点）——此前被 `[round-N] ` 前缀导致的解析失败丢弃了。
-**没有任何发布说明内容被删除**：删除的行都能在新增行里找到对应
-（规范化掉 `(#N)` 与 `[round-N] ` 前缀后逐行比对）。
-关联：oagentkit/matrix-tools#43、oagentkit/matrix-tools#40
-
 
 ## [v0.14.1] — 2026-10-20
 
