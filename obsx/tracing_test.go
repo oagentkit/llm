@@ -129,8 +129,13 @@ func TestTracingHandlerOnError(t *testing.T) {
 	if v, _ := e.value("stage"); v != "R3" {
 		t.Errorf("error.stage = %v", v)
 	}
-	if v, _ := e.value("error"); !errors.Is(toErr(v), context.DeadlineExceeded) && v != "context deadline exceeded" {
-		t.Errorf("error.error = %v", v)
+	// 错误字段名走 logx.ErrKey（"err"），不再手写 "error"（oagentkit/llm#144：
+	// 两矩阵落同一 Loki/ES，字面量分裂成两个 key）
+	if v, _ := e.value(logx.ErrKey); !errors.Is(toErr(v), context.DeadlineExceeded) && v != "context deadline exceeded" {
+		t.Errorf("error.%s = %v", logx.ErrKey, v)
+	}
+	if _, ok := e.value("error"); ok {
+		t.Errorf("llm.call.error 不应再带手写 \"error\" 字段（oagentkit/llm#144）")
 	}
 }
 

@@ -256,9 +256,15 @@ func (c *Chain) Complete(ctx context.Context, req Request) (string, error) {
 }
 
 // attempt 在一个环节内完成调用（可重试）。
+//
+// 熔断记账口径与 Resilient.tryProvider 对齐（llm#141）：一次 Allow 放行
+// （含内部 N 次物理重试）只在收口处报**一次** Failure/Success/Abandon——
+// 此前每次物理重试都报 Failure，连续失败阈值被单个逻辑请求整体烧穿
+// （WithConsecutiveFailures(3) + WithRetries(2) 下一次 Complete 即熔断），
+// 且 WithRetries 文档从未声明「重试会加速熔断」。
 func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint64) (string, error) {
 	var lastErr error
-	for i := 0; i < c.attempts; i++ {
+	for i := range c.attempts {
 		out, err := e.c.Complete(ctx, req)
 		if err == nil {
 			c.breakers.Success(e.name, gen)
@@ -271,16 +277,23 @@ func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint
 			c.breakers.Abandon(e.name, gen)
 			return "", err
 		}
-		c.breakers.Failure(ctx, e.name, gen)
 		if !c.classify(err) {
-			return "", err // 不可重试 → 直接切下一环
+			// 不可重试 → 真实失败，报一次 Failure 切下一环。
+			c.breakers.Failure(ctx, e.name, gen)
+			return "", err
 		}
 		if i+1 < c.attempts {
 			if !sleep(ctx, c.delay(i)) {
+				// 退避等待被 ctx 取消：失败已发生（非调用中取消），按一次
+				// 真实失败记账后原样上抛——与旧实现（循环内先报 Failure 再
+				// 睡）记账等价，只是收口到一次。
+				c.breakers.Failure(ctx, e.name, gen)
 				return "", ctx.Err()
 			}
 		}
 	}
+	// 重试耗尽：整次领取报一次 Failure（解除半开探测占位含在内）。
+	c.breakers.Failure(ctx, e.name, gen)
 	return "", lastErr
 }
 

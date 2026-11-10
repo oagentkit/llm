@@ -19,6 +19,11 @@ type OpenAIProvider struct {
 	timeout         time.Duration
 	costPer1K       [2]float64 // [prompt, completion]
 
+	// injectedHTTPClient 宿主显式注入了 HTTPClient（llm#143）：注入后超时
+	// 归注入方 own，AttemptTimeout() 返回 0——Resilient 链不再叠加 per-attempt
+	// 截止，与「本仓不再叠加自己的 Timeout」的文档承诺一致。
+	injectedHTTPClient bool
+
 	chatModel model.BaseChatModel
 }
 
@@ -27,9 +32,16 @@ type OpenAIProviderConfig struct {
 	BaseURL         string
 	APIKey          string
 	Model           string
-	ContextTokens   int           // 模型上下文窗口（默认 128k）
-	MaxOutputTokens int           // 单次输出上限（默认从窗口派生）
-	Timeout         time.Duration // 请求超时（默认 60s）
+	ContextTokens   int // 模型上下文窗口（默认 128k）
+	MaxOutputTokens int // 单次输出上限（默认从窗口派生）
+	// Timeout 请求超时（默认 60s）。**双层语义**（llm#143）：
+	//   - HTTP 层：未注入 HTTPClient 时传给下游 ChatModelConfig；注入后由
+	//     注入的 Client 完全接管，本字段对 HTTP 层无效；
+	//   - 链层：Resilient 的 per-attempt 截止（AttemptTimeout）读同字段——
+	//     但**注入 HTTPClient 后 AttemptTimeout 恒返回 0**（超时归注入方
+	//     own，本仓不再叠加自己的 Timeout，fillDefaults 的 60s 缺省也不生效）；
+	//     未注入时 0 落位 60s 构成链层隐形上限，长生成场景请显式调大。
+	Timeout time.Duration
 	// CaptureRetryAfter 捕获 429 响应的 Retry-After 头（批次四十五，对标 ZCode
 	// runner-retry 的服务端退避建议）：经 ctx sink 透出给重试环的退避取舍。
 	// 需要 http.Client 注入（Timeout 语义由注入的 Client 自带保留）。
@@ -70,12 +82,13 @@ func NewOpenAIProvider(ctx context.Context, cfg OpenAIProviderConfig) (*OpenAIPr
 	}
 
 	return &OpenAIProvider{
-		modelName:       cfg.Model,
-		contextTokens:   cfg.ContextTokens,
-		maxOutputTokens: cfg.MaxOutputTokens,
-		timeout:         cfg.Timeout,
-		costPer1K:       [2]float64{cfg.CostPer1KPrompt, cfg.CostPer1KCompletion},
-		chatModel:       chatModel,
+		modelName:          cfg.Model,
+		contextTokens:      cfg.ContextTokens,
+		maxOutputTokens:    cfg.MaxOutputTokens,
+		timeout:            cfg.Timeout,
+		costPer1K:          [2]float64{cfg.CostPer1KPrompt, cfg.CostPer1KCompletion},
+		injectedHTTPClient: cfg.HTTPClient != nil,
+		chatModel:          chatModel,
 	}, nil
 }
 
@@ -151,4 +164,13 @@ func (p *OpenAIProvider) CostPer1KTokens() (float64, float64) {
 }
 
 // AttemptTimeout 单次尝试超时（Resilient 降级链按 Provider 独立限时）。
-func (p *OpenAIProvider) AttemptTimeout() time.Duration { return p.timeout }
+// 注入 HTTPClient 后恒返回 0（llm#143）：超时由注入的 Client own，Resilient
+// 跳过 per-attempt 截止——与 HTTPClient 字段注释「本仓不再叠加自己的 Timeout」
+// 对齐（此前 HTTP 层忽略、链层仍生效的「半忽略」形态，长生成在链上被 60s
+// 缺省截死、裸 Client 却能跑满）。
+func (p *OpenAIProvider) AttemptTimeout() time.Duration {
+	if p.injectedHTTPClient {
+		return 0
+	}
+	return p.timeout
+}

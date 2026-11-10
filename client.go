@@ -110,6 +110,35 @@ func (c *Client) BoundBudget() TokenAccountant { return c.Budget }
 // 口径——英文估算略升为保守方向，精确计量始终归 provider usage 回传）。
 func estimateTokens(s string) int { return textutil.EstTokensCJK(s) }
 
+// estimateMsgTokens 无 usage 回传时的整消息估算面（llm#139）：正文之外，
+// ToolCalls（工具名 + 参数 JSON——大入参工具调用只算正文会系统性低估，
+// 预算短路形同虚设）与三组多模态字段的文本部件同样计入。口径对齐
+// textx/compact 的 msgTokens（同 org 两套估算不许分叉：彼处同样正文 +
+// ToolCalls 双计），多模态部件按文本计——图片/音频 URL 的真实 token 由
+// provider usage 回传兜底，本地估算只做保守下界。
+func estimateMsgTokens(msgs []*schema.Message) int {
+	total := 0
+	for _, m := range msgs {
+		if m == nil {
+			continue
+		}
+		total += estimateTokens(m.Content)
+		for _, tc := range m.ToolCalls {
+			total += estimateTokens(tc.Function.Name) + estimateTokens(tc.Function.Arguments)
+		}
+		for _, part := range m.MultiContent {
+			total += estimateTokens(part.Text)
+		}
+		for _, part := range m.UserInputMultiContent {
+			total += estimateTokens(part.Text)
+		}
+		for _, part := range m.AssistantGenMultiContent {
+			total += estimateTokens(part.Text)
+		}
+	}
+	return total
+}
+
 func (c *Client) account(stage string, in []*schema.Message, out *schema.Message) {
 	var p, comp, cached int
 	if out != nil && out.ResponseMeta != nil && out.ResponseMeta.Usage != nil {
@@ -119,11 +148,9 @@ func (c *Client) account(stage string, in []*schema.Message, out *schema.Message
 		// 估算路径无缓存概念、留 0。
 		cached = u.PromptTokenDetails.CachedTokens
 	} else {
-		for _, m := range in {
-			p += estimateTokens(m.Content)
-		}
+		p = estimateMsgTokens(in)
 		if out != nil {
-			comp = estimateTokens(out.Content)
+			comp = estimateMsgTokens([]*schema.Message{out})
 		}
 	}
 	if c.OnUsage != nil {
@@ -219,9 +246,14 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 	ctx = WithRetryAfterSink(ctx)
 	var lastErr error
 	var lastHint RetryHint
-	truncatedBoosted := false
+	// 提升后的输出上限（0 = 未提升）。粘性记在「当前生效参数」上而不是
+	// 「是否尝试过」（llm#142）：此前 opts 逐轮重建、只在截断 hint 的下一轮
+	// 携带 boost——提升轮撞瞬态失败后重试静默退回原上限再截断，最终被上层
+	// 读成「提升后仍截断」而放弃。提升后每轮恒携带，直到提升轮真的再截断
+	// 才判「提升无效」收手。
+	boostTokens := 0
 	attempts := 0
-	for attempt := 0; attempt < pol.maxAttempts; attempt++ {
+	for attempt := range pol.maxAttempts {
 		if attempt > 0 {
 			if !sameModelRetryDecision(pol.chainFallback, lastHint, lastErr) {
 				break
@@ -230,21 +262,24 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 				return nil, attempts, err
 			}
 		}
-		var opts []model.Option
 		if lastHint.IsTruncated {
 			// 提升后仍截断（或无 MaxOutputTokens 可提升）：同参数重试注定再
 			// 截断，白烧一次钱——就此打住，交上层（降级链切换/调用方处置）
-			if truncatedBoosted || c.MaxOutputTokens <= 0 {
+			if boostTokens > 0 || c.MaxOutputTokens <= 0 {
 				break
 			}
-			boosted := c.MaxOutputTokens * 3 / 2
-			opts = append(opts, model.WithMaxTokens(boosted))
-			truncatedBoosted = true
+			boostTokens = c.MaxOutputTokens * 3 / 2
 			// 提升输出上限的那轮按新上限重算输入预算再裁剪一次（llm#83）：
 			// 输入按 1 倍预留裁剪过，1.5 倍输出上限 + 原输入可能 > 窗口——
 			// 二次尝试以 context too long 收场，还会被 ClassifyLLMError 判成
 			// 确定性失败，在降级链上白烧一次模型切换
-			c.fitInputFor(boosted, msgs)
+			c.fitInputFor(boostTokens, msgs)
+		}
+		// boost 粘性（llm#142）：提升后的每一轮（含非截断失败的续命重试轮）
+		// 都按提升值携带，不许静默回落原上限。
+		var opts []model.Option
+		if boostTokens > 0 {
+			opts = append(opts, model.WithMaxTokens(boostTokens))
 		}
 		attempts = attempt + 1
 		out, err := c.oneAttempt(ctx, stage, msgs, pol.attemptTimeout, opts)

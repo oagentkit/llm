@@ -18,13 +18,17 @@ type Provider interface {
 	ContextTokens() int
 	// MaxOutputTokens 返回单次生成输出上限。
 	MaxOutputTokens() int
-	// CostPer1KTokens 返回每 1000 token 的成本（美元）。
-	// 用于成本追踪，返回 0 表示不计费。
+	// CostPer1KTokens 返回每 1000 token 的成本（美元）；**返回 (0,0) 表示
+	// 「未指定」，不是「免费」**（llm#138：实现方照旧文档「0=不计费」返回
+	// (0,0) 表达免费，模型名恰好命中内建价表时被记出非零成本——两种口径
+	// 在这里分家过，已收口）。
 	//
-	// ⚠️ 返回 0 有歧义：「这个模型免费」与「没配价」分不开。llm 层的定价
-	// 会把 0 视为「未指定」，回落到内建价表（PriceTable）；价表也查不到时
-	// 记为**价格未知**（CostRecord.PriceStatus = PriceUnpriced），不是 0 成本。
-	// 想显式声明单价（折扣价/加价率/人民币折算价）见 PricedProvider。
+	// 返回 (0,0) 时 llm 层的定价回落到内建价表（PriceTable）；价表也查不到
+	// 时记为**价格未知**（CostRecord.PriceStatus = PriceUnpriced），不是 0 成本。
+	//
+	// 想**显式**声明单价（折扣价/加价率/人民币折算价/**免费**）请实现
+	// PricedProvider：ModelPricing 返回 (Price{}, true) 即「明确免费」
+	// （成本恒 0 且状态为 PricePriced），不会回落价表。
 	CostPer1KTokens() (prompt, completion float64)
 }
 
@@ -38,7 +42,8 @@ type Provider interface {
 type PricedProvider interface {
 	Provider
 	// ModelPricing 返回该模型的单价与是否已定价。
-	// 返回 (Price{}, false) 表示「未定价」，llm 会继续回落到价表。
+	//   - (price, true)  显式定价——价为零值即「明确免费」，不回落价表；
+	//   - (Price{}, false) 「未定价」，llm 继续回落到价表。
 	ModelPricing() (Price, bool)
 }
 

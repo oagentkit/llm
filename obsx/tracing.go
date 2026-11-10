@@ -233,7 +233,9 @@ func (h *TracingHandler) onError(ctx context.Context, info *callbacks.RunInfo,
 		"component", compOf(info),
 		"model", state.model,
 		"duration_ms", h.durationSince(state).Milliseconds(),
-		"error", err.Error())
+		// 错误字段名走 logx.ErrKey 常量（"err"）——两矩阵落同一 Loki/ES，
+		// 手写 "error" 字面量会分裂成两个 key、查询侧 OR 双写（oagentkit/llm#144）
+		logx.ErrKey, err.Error())
 	return ctx
 }
 
