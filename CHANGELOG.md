@@ -30,6 +30,7 @@ range-over-int（Go 1.22）用于两处重试循环；测试 8 条回归用例�
 命名，回归时按号检索。
 * style: gofmt（issue_sweep_test.go 结构体字面量对齐、openai.go 注释对齐）
 
+- 杂务(deps)：依赖地板追到最新——guardx v0.24.2 / textx v0.10.8 / runtime v0.12.7（2026-11-11 列车）
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.33.0
 
 | 依赖 | 现地板 | 抬到 |
