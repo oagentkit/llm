@@ -80,7 +80,8 @@ func PriceOfMatched(pricing map[string]Price, model string) (Price, string, bool
 //
 // 优先级（**显式永远压过查表**）：
 //
-//  1. PricedProvider.ModelPricing() 显式单价（美元 / 每 1M）——折扣价、加价率、折算价；
+//  1. PricedProvider.ModelPricing() 显式单价（美元 / 每 1M）——折扣价、加价率、
+//     折算价、**免费**（(Price{}, true) 零价也是显式定价，不回落价表，llm#138）；
 //  2. Provider.CostPer1KTokens() 非零（每 1K）——历史显式口径，内部换算到每 1M；
 //  3. 按模型名查价表（table；nil = 内建价表）。
 //

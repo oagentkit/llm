@@ -210,10 +210,18 @@ type Resilient struct {
 	lastModel string // 最近一次成功调用使用的模型
 }
 
-// NewResilient 创建弹性客户端。空 Provider 列表报错。
+// NewResilient 创建弹性客户端。空 Provider 列表报错；逐元素 nil/typed-nil
+// fail-fast（llm#140）——条件装配（配置驱动的构造）最容易产出 nil 元素
+// （queue#71 同款纪律），此前首次 Generate 在 stepChain 的 p.ModelName() 上
+// panic 给调用方 goroutine，弹性库不能把崩溃带给宿主。
 func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error) {
 	if chain == nil || len(chain.Providers) == 0 {
 		return nil, fmt.Errorf("llm: Resilient 需要至少一个 Provider")
+	}
+	for i, p := range chain.Providers {
+		if isNilProvider(p) {
+			return nil, fmt.Errorf("llm: Resilient 链上第 %d 个 Provider 为 nil（含 typed-nil，条件装配请过滤后再入链）", i)
+		}
 	}
 	// 尝试预算 = max(90s, 链上 provider 声明的单次尝试限时)——探测时限推导须
 	// 覆盖最坏在途（长超时配置下半开隔离才不失效）
@@ -554,6 +562,20 @@ func isNilModel(m model.BaseChatModel) bool {
 		return true
 	}
 	v := reflect.ValueOf(m)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func:
+		return v.IsNil()
+	}
+	return false
+}
+
+// isNilProvider 判断 Provider 是否为 nil（含包装在接口里的 typed nil 指针，
+// 如 (*OpenAIProvider)(nil)——其方法内解引用字段会 panic，构造期就得拦下）。
+func isNilProvider(p Provider) bool {
+	if p == nil {
+		return true
+	}
+	v := reflect.ValueOf(p)
 	switch v.Kind() {
 	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func:
 		return v.IsNil()
