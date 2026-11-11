@@ -30,7 +30,7 @@ package port
 import (
 	"errors"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -201,7 +201,7 @@ func newPriceTable(overrides map[string]Price) *PriceTable {
 	for k := range overrides {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return overridePriority(keys[i], keys[j]) < 0 })
+	slices.SortFunc(keys, overridePriority)
 	for _, k := range keys {
 		t.applyOverride(k, overrides[k])
 	}
@@ -242,7 +242,7 @@ func (t *PriceTable) Models() []string {
 	for _, e := range t.table {
 		out = append(out, e.key)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
