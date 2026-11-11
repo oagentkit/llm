@@ -81,7 +81,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -229,9 +229,7 @@ func choiceConfidence(probs map[string]float64) (float64, bool) {
 	}
 	pTop := 0.0
 	for _, p := range probs {
-		if p > pTop {
-			pTop = p
-		}
+		pTop = max(pTop, p)
 	}
 	if n == 1 {
 		return 1, true
@@ -259,7 +257,7 @@ func scoreConfidence(probs map[string]float64) (float64, bool) {
 	for i := range idx {
 		keys = append(keys, i)
 	}
-	sort.Ints(keys)
+	slices.Sort(keys)
 	for i, k := range keys {
 		if k != i {
 			return 0, false // 档位不连续 ⇒ 公式不适用，回落端点值
@@ -288,13 +286,7 @@ func scoreConfidence(probs map[string]float64) (float64, bool) {
 
 // clamp01 钳位到 [0,1]。
 func clamp01(v float64) float64 {
-	if v < 0 {
-		return 0
-	}
-	if v > 1 {
-		return 1
-	}
-	return v
+	return min(1, max(0, v))
 }
 
 // absInt 绝对值（避免为一个小函数引 math）。
@@ -562,7 +554,7 @@ func firstCandidate(criteria any) string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	if len(keys) == 0 {
 		return ""
 	}
