@@ -40,26 +40,46 @@ func (s exportSet) names() map[string]bool {
 	return out
 }
 
+// parseGoFiles ParseDir 的定向替身（SA1019：go/parser.ParseDir 自 Go 1.25 弃用）。
+// 这里只需要「目录下直接包含的非测试 .go 文件」平铺集，不需要 build-tag 的
+// 包关联语义——os.ReadDir + parser.ParseFile 等价且口径更直白。
+func parseGoFiles(t *testing.T, dir string) map[string]*ast.File {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读取 %s 失败：%v", dir, err)
+	}
+	out := map[string]*ast.File{}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("解析 %s 失败：%v", name, err)
+		}
+		out[name] = f
+	}
+	return out
+}
+
 // parseExports 解析 dir 下的包，返回它的导出符号集合。
 // 只看该目录**直接**包含的 .go 文件（不递归）——根包在 module 根，
 // 本包在 llm/ 子目录，两者的文件都平铺在自己那一层。
 func parseExports(t *testing.T, dir string, pkgName string) (exportSet, map[string]*ast.TypeSpec) {
 	t.Helper()
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("解析 %s 失败：%v", dir, err)
+	files := parseGoFiles(t, dir)
+	if len(files) == 0 {
+		t.Fatalf("%s 下没有非测试 .go 文件", dir)
 	}
-	pkg, ok := pkgs[pkgName]
-	if !ok {
-		names := make([]string, 0, len(pkgs))
-		for n := range pkgs {
-			names = append(names, n)
+	// ParseDir 按包名分组；平铺替身同口径核对：目录内混入别的包名即 fail
+	// （兼容面扫描只对单一包的目录有意义）。
+	for name, f := range files {
+		if f.Name.Name != pkgName {
+			t.Fatalf("%s/%s 的包名是 %q，不是 %q（目录混包，兼容面口径不成立）", dir, name, f.Name.Name, pkgName)
 		}
-		sort.Strings(names)
-		t.Fatalf("%s 下找不到包 %q，实际有：%v", dir, pkgName, names)
 	}
 
 	out := exportSet{
@@ -67,7 +87,7 @@ func parseExports(t *testing.T, dir string, pkgName string) (exportSet, map[stri
 		vars: map[string]bool{}, consts: map[string]bool{},
 	}
 	typeSpecs := map[string]*ast.TypeSpec{}
-	for _, f := range pkg.Files {
+	for _, f := range files {
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
 			case *ast.FuncDecl:
@@ -177,15 +197,7 @@ func TestCompatParity(t *testing.T) {
 // 而是变成另一个签名——兼容层从此与根包悄悄分叉，且不会有任何编译错误提示。
 // var 转发把签名交给编译器守着：根包改了，这里跟着改。
 func TestCompatNoWrapperFunc(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("解析失败：%v", err)
-	}
-	pkg := pkgs["llm"]
-	for _, f := range pkg.Files {
+	for _, f := range parseGoFiles(t, ".") {
 		for _, d := range f.Decls {
 			decl, ok := d.(*ast.FuncDecl)
 			if !ok || decl.Recv != nil {
