@@ -2,6 +2,30 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.21.12] — 2026-11-12
+
+### 修复：sweep2 批量修复 5 单——obsx finish_reason/PreviewLen 契约、port 熔断缺省、llmtest ResponseMeta 与字段契约（#164-#168）
+
+- #164 obsx 非流式 onEnd 补落 finish_reason（复用单源 finishReasonOf，与流式路径对齐）
+- #165 port.NewBreakers 铺底 DefaultBreakerTrip/Cooldown（缺省 3 连败 / 5min 冷却），
+  调用方 opts 后写覆盖——「未传」与「显式传」可区分，port.Chain 端到端钉住
+- #166 llmtest Stream 按 Resp 填 ResponseMeta（respMetaOf 单源，Generate/Stream 共用）
+- #167 llmtest 四处字段契约：Completion-only 也落 usage、ToolTag 派生副本真追加、
+  StreamContent 文档改回落口径、耗尽编号随真实调用序（Calls 同源自增）
+- #168 obsx Options.PreviewLen 兑现：输入侧 input_preview、流式侧 output_preview
+  （drainStream 累计 delta）、input_len/output_len 恒落（0 = 只落长度）
+
+- 杂务：go 1.25+ 语言特性纯现代化——range-over-int / builtin min-max / wg.Go / slices.Sort / slices.Sorted(maps.Keys)（行为零变化）
+
+- rangeint：计数循环转 for range N（client.generateJSONFitted 回喂轮、port.Chain.delay、resilient/wrap/pricing/llmtest/ratelimit 等测试循环）
+- minmax：手写 if/else 上下限收编 builtin min/max（backoffDelayJittered、BudgetConfig、openai.fillDefaults、BusyAdmissionDelay、fit L3 keep）
+- waitgroupgo：recovery_test 干净 Add(1)/go/Done fan-out 收编 wg.Go（async.GoSafe 封装的 pricing 并发回归不动）
+- slices.Sort：compat_test sort.Strings ×3 → slices.Sort
+- slices.Sorted(maps.Keys)：decision.firstCandidate map 键收集+排序
+- errors.go isDigitToken 字符串字节扫描转 for i := range len(s)（保持字节语义）
+- 不动项（保守跳过）：errors.AsType / new(expr) / maps.Copy / slices.Backward / strings.Cut 等规则外建议；errors.go containsMarker 子串扫描（非计数循环）；pricing.go 自定义 SortFunc 键排序；fit.go/assemble.go 无后置语句的 while 形循环
+
+
 ## [v0.21.11] — 2026-11-12
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.46.0
