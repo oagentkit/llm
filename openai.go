@@ -100,10 +100,7 @@ func (c *OpenAIProviderConfig) fillDefaults() {
 		c.ContextTokens = 128_000
 	}
 	if c.MaxOutputTokens == 0 {
-		c.MaxOutputTokens = c.ContextTokens * 5 / 100
-		if c.MaxOutputTokens < 4096 {
-			c.MaxOutputTokens = 4096
-		}
+		c.MaxOutputTokens = max(c.ContextTokens*5/100, 4096)
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = 60 * time.Second

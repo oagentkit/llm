@@ -79,6 +79,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -550,11 +551,7 @@ func firstCandidate(criteria any) string {
 	if !ok {
 		return ""
 	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(m))
 	if len(keys) == 0 {
 		return ""
 	}

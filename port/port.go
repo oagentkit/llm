@@ -322,7 +322,7 @@ func (c *Chain) usage(req Request, resp string) Usage {
 // delay 第 i 次重试前的退避时长（指数，max 封顶）。
 func (c *Chain) delay(i int) time.Duration {
 	d := c.base
-	for k := 0; k < i; k++ {
+	for range i {
 		d *= 2
 		if d >= c.maxDelay {
 			return c.maxDelay

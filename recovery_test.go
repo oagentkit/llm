@@ -205,9 +205,7 @@ func TestBusyAdmissionDelayConcurrentSwap_Issue130(t *testing.T) {
 	stop := make(chan struct{})
 	// 读者：并发取档（模拟重试热路径）。
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -221,19 +219,17 @@ func TestBusyAdmissionDelayConcurrentSwap_Issue130(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	// 写者：原子替换（模拟门面 setter 调优）。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
+	wg.Go(func() {
+		for i := range 200 {
 			if err := SetBusyAdmissionDelays(tables[i%len(tables)]); err != nil {
 				t.Errorf("SetBusyAdmissionDelays: %v", err)
 				return
 			}
 		}
 		close(stop)
-	}()
+	})
 	wg.Wait()
 }
