@@ -2,7 +2,7 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
-## [v0.21.12] — 2026-11-12
+## [v0.21.12] — 2026-11-13
 
 ### 修复：sweep2 批量修复 5 单——obsx finish_reason/PreviewLen 契约、port 熔断缺省、llmtest ResponseMeta 与字段契约（#164-#168）
 
