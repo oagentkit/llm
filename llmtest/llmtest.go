@@ -14,12 +14,13 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Resp 单次调用的脚本条目（Generate 与 Stream 共按序消费）。
+// Resp 单次调用的脚本条目（Generate 与 Stream 共按序消费，两路都按本条目
+// 填 ResponseMeta——单源 respMetaOf，防两路漂移）。
 type Resp struct {
 	Content      string // 响应文本（Err 非空时忽略）
 	Err          error  // 非空时本次调用返回该错误
 	FinishReason string // 非空时填入 ResponseMeta（截断重试等场景断言用）
-	// Prompt/Completion 非零时填入 ResponseMeta.Usage（真实 usage 记账断言用）。
+	// Prompt/Completion 任一非零时填入 ResponseMeta.Usage（真实 usage 记账断言用）。
 	Prompt     int
 	Completion int
 	// ToolCalls 附带的工具调用（tool-calling 协议桩：adk planexecute 的
@@ -41,15 +42,16 @@ func ToolCall(name, arguments string) []schema.ToolCall {
 //   - Script 按调用序消费；RepeatLast=true 时耗尽后重复末条（重试/降级链测试：
 //     持续错误才能触发切换），false 时耗尽报错（防桩被多调——脚本写漏立即可见）；
 //   - FirstInput/LastInput 记录每次 Generate 的首/末消息文本（提示词断言用）；
-//   - StreamContent 非空时 Stream 返回该内容的单块流，空则报错（多数测试桩
-//     不需要流式路径）；
-//   - Calls 为 Generate+Stream 总调用数。
+//   - StreamContent 非空时 Stream 返回该内容的单块流（优先于脚本），空则回落到
+//     脚本条目——Generate/Stream 共享同一调用序，脚本为空/耗尽才报错；
+//   - Calls 为 Generate+Stream 总调用数（含脚本耗尽/空脚本那几次报错的调用——
+//     与耗尽错误里的「第 N 次调用」同源，报的是真实调用序）。
 type Model struct {
 	mu sync.Mutex
 
 	Script     []Resp
 	RepeatLast bool
-	// StreamContent Stream 路径返回的单块内容（空 = "桩不支持流式"）。
+	// StreamContent Stream 路径的单块内容：非空时优先于脚本，空 = 按脚本条目出流。
 	StreamContent string
 
 	// 断言面（测试读取）。
@@ -79,29 +81,37 @@ func (m *Model) Generate(_ context.Context, in []*schema.Message, _ ...model.Opt
 	if err != nil {
 		return nil, err
 	}
-	m.Calls++
 	if resp.Err != nil {
 		return nil, resp.Err
 	}
-	out := &schema.Message{Role: schema.Assistant, Content: resp.Content, ToolCalls: resp.ToolCalls}
-	if resp.FinishReason != "" || resp.Prompt > 0 {
-		out.ResponseMeta = &schema.ResponseMeta{}
-		if resp.FinishReason != "" {
-			out.ResponseMeta.FinishReason = resp.FinishReason
-		}
-		if resp.Prompt > 0 {
-			out.ResponseMeta.Usage = &schema.TokenUsage{
-				PromptTokens: resp.Prompt, CompletionTokens: resp.Completion,
-				TotalTokens: resp.Prompt + resp.Completion,
-			}
-		}
-	}
+	out := &schema.Message{Role: schema.Assistant, Content: resp.Content, ToolCalls: resp.ToolCalls,
+		ResponseMeta: respMetaOf(resp)}
 	return out, nil
 }
 
+// respMetaOf 按脚本条目构造 ResponseMeta（Generate 与 Stream 的单源——
+// oagentkit/llm#166：此前 Stream 完全不填，同一 Resp 条目走 Stream 的
+// usage/finish_reason 恒为 nil，mock 与真实 provider 契约分叉）。
+func respMetaOf(resp Resp) *schema.ResponseMeta {
+	// Prompt/Completion 任一非零即落 Usage（oagentkit/llm#167A：此前判据只看
+	// Prompt，只给 Completion 的条目整份 ResponseMeta 都不生成、连 FinishReason
+	// 也一并丢——与「Prompt/Completion 非零时填入」的字段文档相悖）。
+	if resp.FinishReason == "" && resp.Prompt == 0 && resp.Completion == 0 {
+		return nil
+	}
+	meta := &schema.ResponseMeta{FinishReason: resp.FinishReason}
+	if resp.Prompt > 0 || resp.Completion > 0 {
+		meta.Usage = &schema.TokenUsage{
+			PromptTokens: resp.Prompt, CompletionTokens: resp.Completion,
+			TotalTokens: resp.Prompt + resp.Completion,
+		}
+	}
+	return meta
+}
+
 // Stream 按同一脚本响应（Generate/Stream 共享调用序）：条目带 ToolCalls 时
-// 发带工具调用的消息，否则发 Content。StreamContent 非空时优先恒定内容
-// （简洁的单内容流场景）。
+// 发带工具调用的消息，否则发 Content；ResponseMeta 与 Generate 同源填充。
+// StreamContent 非空时优先恒定内容（简洁的单内容流场景），空则回落到脚本条目。
 func (m *Model) Stream(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -115,17 +125,21 @@ func (m *Model) Stream(_ context.Context, in []*schema.Message, _ ...model.Optio
 	}
 	if m.StreamContent != "" {
 		m.Calls++
-		return singleMsgStream(m.StreamContent, nil), nil
+		return msgStream(&schema.Message{Role: schema.Assistant, Content: m.StreamContent}), nil
 	}
 	resp, err := m.next()
 	if err != nil {
 		return nil, err
 	}
-	m.Calls++
 	if resp.Err != nil {
 		return nil, resp.Err
 	}
-	return singleMsgStream(resp.Content, resp.ToolCalls), nil
+	return msgStream(&schema.Message{
+		Role:         schema.Assistant,
+		Content:      resp.Content,
+		ToolCalls:    resp.ToolCalls,
+		ResponseMeta: respMetaOf(resp),
+	}), nil
 }
 
 // flatMsgs 消息序列扁平串（提示词组装断言用）。
@@ -137,41 +151,85 @@ func flatMsgs(in []*schema.Message) string {
 	return strings.Join(parts, "\n")
 }
 
-// singleMsgStream 单块消息流。
-func singleMsgStream(content string, toolCalls []schema.ToolCall) *schema.StreamReader[*schema.Message] {
+// msgStream 单块消息流（llmtest 的流恒为单块：Pipe(1) 预填一帧后 Close——
+// ToolModel 的 ToolTag 改写依赖这条不变量同步取帧，不需要转发 goroutine）。
+func msgStream(msg *schema.Message) *schema.StreamReader[*schema.Message] {
 	sr, sw := schema.Pipe[*schema.Message](1)
-	sw.Send(&schema.Message{Role: schema.Assistant, Content: content, ToolCalls: toolCalls}, nil)
+	sw.Send(msg, nil)
 	sw.Close()
 	return sr
 }
 
-// next 取下一条脚本（内部已持锁）。
+// next 取下一条脚本（内部已持锁）。每次真实调用（含空脚本/耗尽报错的那几次）
+// 都在这里自增 Calls——让 Calls 与错误消息里的「第 N 次调用」同源反映真实
+// 调用序（oagentkit/llm#167D：此前耗尽分支不自增、Calls 停在 len(Script)，
+// 连续耗尽永远报同一个「第 2 次调用」）。
 func (m *Model) next() (Resp, error) {
+	m.Calls++
 	if len(m.Script) == 0 {
-		return Resp{}, fmt.Errorf("llmtest: 脚本为空（第 %d 次调用）", m.Calls+1)
+		return Resp{}, fmt.Errorf("llmtest: 脚本为空（第 %d 次调用）", m.Calls)
 	}
-	if m.Calls >= len(m.Script) {
+	idx := m.Calls - 1
+	if idx >= len(m.Script) {
 		if m.RepeatLast {
 			return m.Script[len(m.Script)-1], nil
 		}
-		return Resp{}, fmt.Errorf("llmtest: 脚本耗尽（第 %d 次调用）", m.Calls+1)
+		return Resp{}, fmt.Errorf("llmtest: 脚本耗尽（第 %d 次调用）", m.Calls)
 	}
-	return m.Script[m.Calls], nil
+	return m.Script[idx], nil
 }
 
 // ToolModel 带 WithTools 派生能力的桩（ADK 绑工具路径的降级语义测试用；
 // Model 本身不实现 ToolCallingChatModel——不支持绑定的场景直接用 Model）。
 type ToolModel struct {
 	*Model
-	// ToolTag WithTools 派生副本的 Content 后缀（区分派生前后的响应）。
+	// ToolTag WithTools 派生副本的 Content 后缀（区分派生前后的响应）：
+	// 只在 WithTools 返回的派生副本上追加，父桩自身不加。
+	// oagentkit/llm#167B：此前该字段只被原样复制、从未拼进 Content，
+	// 设了也完全不起作用（死字段）。
 	ToolTag string
+	// derived 标记 WithTools 派生副本——ToolTag 只在派生副本上生效。
+	derived bool
 }
 
 var _ model.ToolCallingChatModel = (*ToolModel)(nil)
 
 // WithTools 返回带 ToolTag 标记的派生副本（脚本与状态共享父桩）。
 func (t *ToolModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return &ToolModel{Model: t.Model, ToolTag: t.ToolTag}, nil
+	return &ToolModel{Model: t.Model, ToolTag: t.ToolTag, derived: true}, nil
+}
+
+// Generate 按共享脚本响应；派生副本在 Content 末尾追加 ToolTag。
+func (t *ToolModel) Generate(ctx context.Context, in []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	out, err := t.Model.Generate(ctx, in, opts...)
+	if err != nil {
+		return nil, err
+	}
+	t.tagContent(out)
+	return out, nil
+}
+
+// Stream 同 Generate 的 ToolTag 口径。单块流同步取帧改写即可
+// （msgStream 不变量，见其注释）。
+func (t *ToolModel) Stream(ctx context.Context, in []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	sr, err := t.Model.Stream(ctx, in, opts...)
+	if err != nil || !t.derived || t.ToolTag == "" {
+		return sr, err
+	}
+	msg, rerr := sr.Recv()
+	sr.Close()
+	if rerr != nil {
+		return nil, rerr
+	}
+	t.tagContent(msg)
+	return msgStream(msg), nil
+}
+
+// tagContent 派生副本给响应 Content 追加 ToolTag（父桩 derived=false 原样透传）。
+func (t *ToolModel) tagContent(msg *schema.Message) {
+	if t.derived && t.ToolTag != "" && msg != nil {
+		msg.Content += t.ToolTag
+	}
 }
 
 // Provider llm.Provider 接口的测试实现（Resilient 降级链测试用）。

@@ -9,8 +9,10 @@ import (
 )
 
 // 熔断默认值。放在 llm 而非直接引用上游常量：上游 breaker 未导出默认值（它的缺省是
-// 「自适应丢弃」，没有 trip/cooldown 概念），而这里的三个值是本包对外承诺的缺省，
+// 「自适应丢弃」，没有 trip/cooldown 概念），而这里的两个值是本包对外承诺的缺省，
 // 属于 ResilientConfig 的 API 契约，不随上游变化。
+// 两条路径共用：eino 路径（llm.Resilient 的 ResilientConfig.fillDefaults）与
+// 窄接口路径（NewBreakers 的缺省铺底）都落到这组常量上。
 const (
 	// DefaultBreakerTrip 模型熔断阈值（连续失败次数）。
 	DefaultBreakerTrip = 3
@@ -36,10 +38,27 @@ type Breakers struct {
 	opts   []breaker.BreakerOption
 }
 
+// NewBreakers 构造按模型名分桶的熔断器集合。
+//
+// 缺省铺底：本包承诺的 DefaultBreakerTrip / DefaultBreakerCooldown 先入列、
+// 调用方 opts 后入列——上游 newBreakerConfig 按序应用（后写覆盖），故
+// **未传**的项落本包缺省、**显式传**的项（含 WithConsecutiveFailures(0)
+// 关闭计数型）照常覆盖。「未传」与「显式传」在此可区分，不拿 0 表达缺省
+// （上游 WithCooldown(0) 直接 panic，0 本就不是合法的「不配置」写法）。
+//
+// oagentkit/llm#165：此前零 option 装配直取上游缺省——计数型触发关闭
+// （consecutive=0）+ 冷却回落 probeTimeout 1min，与本包常量宣传的 3 次连败 /
+// 5min 冷却不一致，port.Chain 的熔断缺省根本不按 3 次开闸。
 func NewBreakers(opts ...breaker.BreakerOption) *Breakers {
+	all := make([]breaker.BreakerOption, 0, len(opts)+2)
+	all = append(all,
+		breaker.WithConsecutiveFailures(DefaultBreakerTrip),
+		breaker.WithCooldown(DefaultBreakerCooldown),
+	)
+	all = append(all, opts...)
 	return &Breakers{
 		byName: make(map[string]breaker.GenBreaker),
-		opts:   opts,
+		opts:   all,
 	}
 }
 
