@@ -328,3 +328,113 @@ func TestTracingHandlerPreview(t *testing.T) {
 		t.Fatalf("预览应截断: %q", got)
 	}
 }
+
+// TestTracingHandlerNonStreamFinishReason 回归（oagentkit/llm#164）：非流式
+// onEnd 此前一行未取 finish_reason——同包流式路径（logUsageEnd）落了该字段，
+// 数据（ResponseMeta.FinishReason）就在手边、单源 finishReasonOf 也现成 ⇒
+// length 截断在非流式观测面恒不可见。#70/#87 修的是流式侧，这里是镜像缺口。
+func TestTracingHandlerNonStreamFinishReason(t *testing.T) {
+	rl := &recordLogger{Logger: logx.NewSlogLogger("test")}
+
+	ctx := InitLLMObservability(context.Background(), rl, Options{})
+	ctx = callbacks.EnsureRunInfo(ctx, "OpenAI", components.ComponentOfChatModel)
+	ctx = callbacks.OnStart(ctx, &model.CallbackInput{Messages: []*schema.Message{schema.UserMessage("hi")}})
+	callbacks.OnEnd(ctx, &model.CallbackOutput{
+		Message: &schema.Message{Role: schema.Assistant, Content: "半截",
+			ResponseMeta: &schema.ResponseMeta{FinishReason: "length"}},
+	})
+
+	end := rl.find("llm.call.end")
+	if end == nil {
+		t.Fatalf("缺 llm.call.end，实际 %d 条", rl.count())
+	}
+	if v, ok := end.value("finish_reason"); !ok || v != "length" {
+		t.Fatalf("非流式 end 应落 finish_reason=length（llm#164），got %v present=%v", v, ok)
+	}
+}
+
+// TestTracingHandlerPreviewInputAndLength 回归（oagentkit/llm#168）：
+// Options.PreviewLen 文档承诺「输入/输出消息内容预览长度、0 = 只落长度」，
+// 此前输入侧无任何预览、全包没有长度字段（n_messages 是条数不是长度）。
+func TestTracingHandlerPreviewInputAndLength(t *testing.T) {
+	fire := func(t *testing.T, opt Options) (*logCall, *logCall) {
+		t.Helper()
+		rl := &recordLogger{Logger: logx.NewSlogLogger("test")}
+		ctx := InitLLMObservability(context.Background(), rl, opt)
+		ctx = callbacks.EnsureRunInfo(ctx, "OpenAI", components.ComponentOfChatModel)
+		ctx = callbacks.OnStart(ctx, &model.CallbackInput{Messages: []*schema.Message{schema.UserMessage("一二三四五六七八")}})
+		callbacks.OnEnd(ctx, &model.CallbackOutput{
+			Message: &schema.Message{Role: schema.Assistant, Content: "回答内容"},
+		})
+		start, end := rl.find("llm.call.start"), rl.find("llm.call.end")
+		if start == nil || end == nil {
+			t.Fatalf("缺 start/end，实际 %d 条", rl.count())
+		}
+		return start, end
+	}
+
+	// PreviewLen=0（生产推荐值）：只落长度、不落内容——「只落长度」这条承诺
+	// 此前无处落地。
+	start, end := fire(t, Options{})
+	if v, ok := start.value("input_len"); !ok || v != 8 {
+		t.Errorf("start.input_len = %v present=%v（应为 8，llm#168）", v, ok)
+	}
+	if _, ok := start.value("input_preview"); ok {
+		t.Error("PreviewLen=0 不应落 input_preview")
+	}
+	if v, ok := end.value("output_len"); !ok || v != 4 {
+		t.Errorf("end.output_len = %v present=%v（应为 4，llm#168）", v, ok)
+	}
+	if _, ok := end.value("output_preview"); ok {
+		t.Error("PreviewLen=0 不应落 output_preview")
+	}
+
+	// PreviewLen>0：输入侧也要有预览（此前只有非流式输出侧）。
+	start2, _ := fire(t, Options{PreviewLen: 4})
+	v, ok := start2.value("input_preview")
+	if !ok || v == "" {
+		t.Fatalf("PreviewLen>0 应落 input_preview（llm#168），got %v present=%v", v, ok)
+	}
+	if got := v.(string); got == "一二三四五六七八" {
+		t.Errorf("input_preview 应按 PreviewLen 截断，got %q", got)
+	}
+}
+
+// TestTracingHandlerStreamPreviewAndLength 回归（oagentkit/llm#168）：流式
+// 收束路径此前不落 output_preview（非流式有）——同包两路不对称；且流式内容
+// 逐帧只带 delta，须累计整条流才能得到全文（取末帧只有尾巴）。
+func TestTracingHandlerStreamPreviewAndLength(t *testing.T) {
+	rl := &recordLogger{Logger: logx.NewSlogLogger("test")}
+
+	ctx := InitLLMObservability(context.Background(), rl, Options{PreviewLen: 4})
+	ctx = callbacks.EnsureRunInfo(ctx, "OpenAI", components.ComponentOfChatModel)
+	ctx = callbacks.OnStart(ctx, &model.CallbackInput{Messages: []*schema.Message{schema.UserMessage("hi")}})
+	callbacks.OnEndWithStreamOutput(ctx, schema.StreamReaderFromArray([]callbacks.CallbackOutput{
+		&model.CallbackOutput{Message: &schema.Message{Role: schema.Assistant, Content: "一二三四"}},
+		&model.CallbackOutput{Message: &schema.Message{Role: schema.Assistant, Content: "五六七八"}},
+	}))
+
+	// 收束是异步排空（GoSafe）：轮询等 end 落盘。
+	deadline := time.Now().Add(2 * time.Second)
+	var end *logCall
+	for time.Now().Before(deadline) {
+		if end = rl.find("llm.call.end"); end != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if end == nil {
+		t.Fatalf("流式收束应落 llm.call.end，实际 %d 条", rl.count())
+	}
+	// 两帧 delta 4+4=8：取末帧只能拿到 4，累计才对。
+	if v, ok := end.value("output_len"); !ok || v != 8 {
+		t.Errorf("end.output_len = %v present=%v（应为 8，llm#168）", v, ok)
+	}
+	v, ok := end.value("output_preview")
+	if !ok || v == "" {
+		t.Fatalf("流式 end 应落 output_preview（llm#168），got %v present=%v", v, ok)
+	}
+	if got := v.(string); got == "一二三四五六七八" {
+		t.Errorf("output_preview 应按 PreviewLen=4 截断，got %q", got)
+	}
+}

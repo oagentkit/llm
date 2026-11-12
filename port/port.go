@@ -131,6 +131,10 @@ type ChainOption func(*Chain)
 //
 // 链上环节的**先后顺序 = WithCompleter 的调用顺序**（先注册者优先）。
 // 不带任何 WithCompleter 时链为空，Complete 返回 ErrEmptyChain。
+//
+// 熔断缺省由 NewBreakers 铺底（DefaultBreakerTrip=3 连败 / DefaultBreakerCooldown=5min，
+// 与 eino 路径 ResilientConfig.fillDefaults 同源）；换阈值用 WithBreaker 传
+// 自定义 NewBreakers(...)（oagentkit/llm#165）。
 func NewChain(opts ...ChainOption) *Chain {
 	c := &Chain{
 		attempts: 1,
