@@ -247,7 +247,7 @@ func TestResilientBreakerTrips(t *testing.T) {
 	r := newResilient(t, p1, p2)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := r.Generate(ctx, "R1", msgs("hi")); err != nil {
 			t.Fatal(err)
 		}
@@ -539,7 +539,7 @@ func TestResilientUserCancelDoesNotTripBreaker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 连续取消次数超过熔断阈值（曾触发连续失败熔断）
-	for i := 0; i < defaultBreakerTrip+2; i++ {
+	for range defaultBreakerTrip + 2 {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 		_, gerr := r.Generate(ctx, "test", msgs("q"))
 		cancel()

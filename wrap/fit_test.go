@@ -44,7 +44,7 @@ func TestFitMessagesPassthrough(t *testing.T) {
 func TestFitMessagesMicrocompact(t *testing.T) {
 	// 8 个工具结果轮：清更早 3 轮（保最近 5 轮）即可入窗（v3.44.0 组粒度）
 	msgs := []*schema.Message{bigTool(schema.System, 10), bigTool(schema.User, 100)}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		msgs = append(msgs, assistantRound(i), bigTool(schema.Tool, 2000))
 	}
 	limit := 10 + 100 + 5*2000 + 1000 // 清 3 轮后留余量
@@ -59,12 +59,12 @@ func TestFitMessagesMicrocompact(t *testing.T) {
 		t.Fatal("消息条数必须不变（语法安全）")
 	}
 	// 工具结果下标：3,5,7,9,11,13,15,17（assistant 在 2,4,6,8,10,12,14,16）
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if got := out[9+2*i].Content; got != strings.Repeat("x", 2000) {
 			t.Fatalf("最近 5 轮不应被清理，第 %d 轮 len=%d", i, len(got))
 		}
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if out[3+2*i] == msgs[3+2*i] {
 			t.Fatal("被清理消息应为克隆，不得污染调用方")
 		}
@@ -84,7 +84,7 @@ func TestFitMessagesProtectsErrorAndReminderResults(t *testing.T) {
 	msgs := []*schema.Message{bigTool(schema.User, 100)}
 	errContent := "调用失败：【tool-error】deadline exceeded" + strings.Repeat("x", 2000)
 	reminderContent := "说明 <system-reminder>NOT USER INPUT</system-reminder>" + strings.Repeat("y", 2000)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		msgs = append(msgs, assistantRound(i))
 		switch i {
 		case 0:
@@ -149,7 +149,7 @@ func TestFitMessagesTruncateLongestUser(t *testing.T) {
 func TestFitMessagesLevel3ToolTruncation(t *testing.T) {
 	// user 很小、工具结果巨大且多（6 轮）：L1 清 1 轮不够、L2 截 user 也不够 → L3 迭代
 	msgs := []*schema.Message{bigTool(schema.User, 100)}
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		msgs = append(msgs, assistantRound(i), bigTool(schema.Tool, 3000))
 	}
 	out, res := FitMessages(msgs, 6000)
@@ -330,7 +330,7 @@ func TestFitModelOnBreakdown(t *testing.T) {
 func TestFitMessagesLevel3NoDeadloopOnSmallResults(t *testing.T) {
 	var msgs []*schema.Message
 	msgs = append(msgs, schema.UserMessage(strings.Repeat("问", 4000)))
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		msgs = append(msgs,
 			&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "c", Type: "function", Function: schema.FunctionCall{Name: "x", Arguments: "{}"}}}},
 			&schema.Message{Role: schema.Tool, ToolCallID: "c", Content: "OK"},

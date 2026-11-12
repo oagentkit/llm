@@ -8,11 +8,7 @@ type BudgetConfig struct {
 // MaxDiffChars diff 总量上限（字符）：窗口 35% 折算字符，min 10k。
 // chars/token 按 4 估算（中文按 2 保守，见 fitInput）。
 func (c BudgetConfig) MaxDiffChars() int {
-	n := c.ContextTokens * 35 / 100 * 4
-	if n < 10_000 {
-		n = 10_000
-	}
-	return n
+	return max(c.ContextTokens*35/100*4, 10_000)
 }
 
 // TaskTokenBudget 任务 token 预算：窗口 60%。
@@ -22,11 +18,7 @@ func (c BudgetConfig) TaskTokenBudget() int {
 
 // MaxOutputTokens 单次生成上限：max(4096, 窗口 5%)。
 func (c BudgetConfig) MaxOutputTokens() int {
-	n := c.ContextTokens * 5 / 100
-	if n < 4096 {
-		n = 4096
-	}
-	return n
+	return max(c.ContextTokens*5/100, 4096)
 }
 
 // ReqBodyMaxChars 需求文本上限：窗口 6%。

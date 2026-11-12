@@ -26,7 +26,7 @@ func seqResp(content, finishReason string, toolCalls int) *schema.Message {
 	if fr := finishReason; fr != "" {
 		m.ResponseMeta = &schema.ResponseMeta{FinishReason: fr}
 	}
-	for i := 0; i < toolCalls; i++ {
+	for range toolCalls {
 		m.ToolCalls = append(m.ToolCalls, schema.ToolCall{ID: "t1", Function: schema.FunctionCall{Name: "x"}})
 	}
 	return m

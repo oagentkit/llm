@@ -159,10 +159,7 @@ func FitMessages(msgs []*schema.Message, limitChars int) ([]*schema.Message, Fit
 			l := sizes[longest]
 			// 注记余量 32：llm fitInput 的 keep 不扣注记开销（截完仍略超限），
 			// 本处两级递进需 L2 后真正入窗，否则 L3 会被这 ~20 rune 噪声无谓触发
-			keep := limitChars - (total - l) - 32
-			if keep < 0 {
-				keep = 0
-			}
+			keep := max(limitChars-(total-l)-32, 0)
 			if keep < l {
 				cloned := *out[longest]
 				cloned.Content = "\n" + textutil.TruncNote(out[longest].Content, keep, textutil.FitInputNote)

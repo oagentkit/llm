@@ -459,7 +459,7 @@ func TestPriceTable_OverrideKeyPriority_Rules(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			for i := 0; i < 100; i++ {
+			for range 100 {
 				tbl := NewPriceTable(c.overrides)
 				_, lk := tbl.Lookup("gpt-4o")
 				if !lk.Found() {
@@ -626,11 +626,11 @@ func TestPriceTable_LookupConcurrent(t *testing.T) {
 	tbl := NewPriceTable(map[string]Price{"mimo-v2.5-pro-20250101": override})
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(1)
 		async.GoSafe(func() {
 			defer wg.Done()
-			for j := 0; j < 200; j++ {
+			for range 200 {
 				if p, lk := tbl.Lookup("mimo-v2.5-pro"); !lk.Found() || p != override {
 					t.Errorf("并发查价结果不对: price=%v lookup=%v", p, lk)
 					return

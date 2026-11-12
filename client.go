@@ -380,21 +380,12 @@ func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.
 func backoffDelayJittered(attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) time.Duration {
 	minDelay := base
 	if isRateLimit {
-		minDelay = 5 * time.Second
-		if minDelay > ceil {
-			minDelay = ceil
-		}
+		minDelay = min(5*time.Second, ceil)
 	}
-	delay := base * time.Duration(1<<uint(attempt-1))
-	if delay < minDelay {
-		delay = minDelay
-	}
+	delay := max(base*time.Duration(1<<uint(attempt-1)), minDelay)
 	// jitter 按当次 delay 幅度（base/2 基准在高 attempt 档抖动占比趋近于零，
 	// 打散效果失效——收口轮修）：单边向上 [delay, (1+ratio)·delay)，永不早于计算退避
-	delay = jitter.UpwardDuration(delay)
-	if delay > ceil {
-		delay = ceil
-	}
+	delay = min(jitter.UpwardDuration(delay), ceil)
 	return delay
 }
 
@@ -427,7 +418,7 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 	// 每轮回喂自行 copy+fit（对齐 Generate 的入口纪律；本函数对 msgs 只读）
 	var lastErr error
 	lastRaw := ""
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		callMsgs := copyMsgs(msgs)
 		if attempt > 0 {
 			hint := "你上一轮的输出无法解析为合法 JSON（错误：%v）。\n请重新输出，且只输出合法 JSON：不要解释、不要 markdown 代码围栏。"

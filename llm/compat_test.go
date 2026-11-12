@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -146,8 +146,8 @@ func TestCompatParity(t *testing.T) {
 			extra = append(extra, n)
 		}
 	}
-	sort.Strings(missing)
-	sort.Strings(extra)
+	slices.Sort(missing)
+	slices.Sort(extra)
 
 	if len(missing) > 0 {
 		t.Errorf("兼容层缺少根包的导出符号（下游会编译不过）：%v\n"+
@@ -176,7 +176,7 @@ func TestCompatParity(t *testing.T) {
 			}
 		}
 		if len(gap) > 0 {
-			sort.Strings(gap)
+			slices.Sort(gap)
 			t.Logf("根包的 %s 未被镜像：%v", kind, gap)
 		}
 	}

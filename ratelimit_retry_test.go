@@ -54,7 +54,7 @@ func TestRateLimitRetryGenerateRecovers(t *testing.T) {
 // bianque 生产形态：5 次尝试内恢复（4 次连续 429 后第 5 次成功）。
 func TestRateLimitRetryBianqueShape(t *testing.T) {
 	script := make([]llmtest.Resp, 0, 5)
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		script = append(script, llmtest.Resp{Err: rlErr429()})
 	}
 	script = append(script, llmtest.Resp{Content: "ok"})

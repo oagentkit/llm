@@ -161,10 +161,7 @@ func BusyAdmissionDelay(retry int) time.Duration {
 	if tbl == nil || len(*tbl) == 0 {
 		return 0
 	}
-	i := retry
-	if i < 0 {
-		i = 0
-	}
+	i := max(retry, 0)
 	if i >= len(*tbl) {
 		i = len(*tbl) - 1
 	}

@@ -22,7 +22,7 @@ func TestModelScriptSemantics(t *testing.T) {
 
 	// RepeatLast：末条重复（重试/降级链测试依赖持续错误）。
 	m2 := &Model{RepeatLast: true, Script: []Resp{{Err: errors.New("down")}}}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := m2.Generate(context.Background(), []*schema.Message{schema.UserMessage("q")}); err == nil {
 			t.Fatal("RepeatLast 应持续返回末条错误")
 		}
