@@ -10,11 +10,13 @@ import (
 //
 // # 价格从哪来
 //
-// 三种记录入口，价格来源不同，**但「价格未知」在任何一条路径上都不会被记成 0**：
+// 两种记录入口，价格来源不同，**但「价格未知」在任何一条路径上都不会被记成 0**：
 //
 //   - RecordAuto：按价表自动查（内建价 + 调用方覆盖）——**推荐**。
 //   - RecordPriced：调用方显式给单价（企业折扣价、代理加价率）。
-//   - Record：调用方每次传单价（**已废弃**，单位是每 1K token，与 Price 的每 1M 差一个数量级）。
+//
+// 历史上的第三入口 Record（调用方每次传「每 1K token」单价）已随 v0.22.0 删除
+// ——两套单位并存是一个数量级的错账来源（BREAKING，迁移见 CHANGELOG v0.22.0）。
 //
 // 查不到价格时记录仍会写入（用量数据不丢），但会被标记为 PriceUnpriced，
 // 可经 Unpriced() / UnpricedCount() 查出来——**0 成本与「价格未知」必须可区分**。
@@ -73,23 +75,6 @@ func NewCostTrackerWithTable(table *PriceTable) *CostTracker {
 // maxCostRecords 单进程保留的最大记录数（长驻进程防无界增长；超限丢最旧，
 // Summary 汇总数字随之只反映窗口内记录）。
 const maxCostRecords = 10_000
-
-// Record 记录一次调用（**调用方自带单价，每 1000 token**）。
-//
-// Deprecated: 单位是「每 1K token」，而 Price/RecordPriced 是「每 1M token」——
-// 同一仓里并存两套单位是一个数量级的错账来源。改用 RecordPriced（显式单价，
-// 单位写在类型上）或 RecordAuto（按价表自动计价）。
-func (ct *CostTracker) Record(model, stage string, promptTokens, completionTokens int, costPer1K [2]float64) {
-	ct.append(CostRecord{
-		Model:            model,
-		Stage:            stage,
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		CostUSD:          costOf(promptTokens, completionTokens, costPer1K),
-		PriceStatus:      PricePriced, // 调用方显式给了价
-		PriceMatched:     MatchExact,
-	})
-}
 
 // RecordPriced 记录一次调用，单价由调用方显式给出（**美元 / 每 1M token**）。
 //
@@ -204,10 +189,6 @@ func (ct *CostTracker) append(rec CostRecord) {
 	// 环形覆盖最旧
 	ct.records[ct.head] = rec
 	ct.head = (ct.head + 1) % maxCostRecords
-}
-
-func costOf(promptTokens, completionTokens int, costPer1K [2]float64) float64 {
-	return float64(promptTokens)/1000*costPer1K[0] + float64(completionTokens)/1000*costPer1K[1]
 }
 
 // Records 返回所有记录的副本（时间序：最旧在前）。

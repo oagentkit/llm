@@ -54,28 +54,6 @@ func LookupPrice(model string) (Price, PriceLookup) { return port.LookupPrice(mo
 // LookupPriceStrict 查价，查不到返回 ErrPriceUnknown。
 func LookupPriceStrict(model string) (Price, error) { return port.LookupPriceStrict(model) }
 
-// PriceOf 按模型名匹配定价表估算单次调用成本（USD；未配价返回 0，不阻塞记账）。
-//
-// Deprecated: 未配价时返回 0，与「免费模型」不可区分——这正是本仓要根除的静默失真。
-// 改用 PriceTable.Lookup / LookupPrice：查不到时是「价格未知」而非 0。
-//
-// 另注意其「最长前缀回落」会把同主干异价 SKU 静默定价错（gpt-4o-mini 命中
-// gpt-4o），新查价 API 不再提供该行为。
-func PriceOf(pricing map[string]Price, model string, prompt, completion int) float64 {
-	return port.PriceOf(pricing, model, prompt, completion)
-}
-
-// PriceOfMatched PriceOf 的可观测形态：返回命中的定价键与是否经前缀回落。
-//
-// 前缀回落对「同主干异价 SKU」（gpt-4o 前缀命中 gpt-4o-mini）会静默误定价
-// ——宿主可在装配期对回落命中做校验/上报（第十轮审计）。
-//
-// Deprecated: 同 PriceOf——未配价返回 0 不可区分「免费」，前缀回落会误定价。
-// 改用 PriceTable.Lookup（返回 PriceLookup，命中方式可见且不做前缀回落）。
-func PriceOfMatched(pricing map[string]Price, model string) (Price, string, bool) {
-	return port.PriceOfMatched(pricing, model)
-}
-
 // providerPrice 解析某个 Provider 的单价。
 //
 // 优先级（**显式永远压过查表**）：
