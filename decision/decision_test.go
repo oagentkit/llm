@@ -155,8 +155,8 @@ func TestEffectiveConfidenceLocalFormula(t *testing.T) {
 	choice := Answer{
 		Type:           TypeChoice,
 		Probabilities:  map[string]float64{"alpha": 0.9808, "beta": 0.0098, "gamma": 0.0094},
-		Confidence:     ptrF(0.9013),
-		XJevConfidence: ptrF(0.9712),
+		Confidence:     new(0.9013),
+		XJevConfidence: new(0.9712),
 	}
 	got, ok := choice.EffectiveConfidence()
 	if !ok {
@@ -173,7 +173,7 @@ func TestEffectiveConfidenceLocalFormula(t *testing.T) {
 		Type:           TypeScore,
 		Probabilities:  map[string]float64{"0": 0.2061, "1": 0.3927, "2": 0.2021, "3": 0.1991},
 		Legend:         map[string]string{"0": "低", "1": "较低", "2": "中", "3": "高"},
-		XJevConfidence: ptrF(0.1936),
+		XJevConfidence: new(0.1936),
 	}
 	got, ok = score.EffectiveConfidence()
 	if !ok {
@@ -183,7 +183,7 @@ func TestEffectiveConfidenceLocalFormula(t *testing.T) {
 		t.Errorf("score 有效置信度 = %v, want 0.1936（Jev 档位距离公式）", got)
 	}
 	// noul：端点给 p=0.8125（Laya 口径），本地一律 |2p−1|=0.625（Jev 口径）。
-	noul := Answer{Type: TypeNoul, Noul: ptrF(0.8125), Confidence: ptrF(0.8125)}
+	noul := Answer{Type: TypeNoul, Noul: new(0.8125), Confidence: new(0.8125)}
 	got, ok = noul.EffectiveConfidence()
 	if !ok {
 		t.Fatal("noul 有效置信度缺失")
@@ -192,7 +192,7 @@ func TestEffectiveConfidenceLocalFormula(t *testing.T) {
 		t.Errorf("noul 有效置信度 = %v, want 0.625（|2p−1|，不吃端点自算值）", got)
 	}
 	// 分布缺失 ⇒ 回落端点 confidence。
-	bare := Answer{Type: TypeChoice, Confidence: ptrF(0.7)}
+	bare := Answer{Type: TypeChoice, Confidence: new(0.7)}
 	got, ok = bare.EffectiveConfidence()
 	if !ok || got != 0.7 {
 		t.Errorf("无分布时应回落端点 confidence: %v %v", got, ok)
@@ -344,9 +344,6 @@ func TestMockModeOff(t *testing.T) {
 		t.Fatal("mock 关闭时不可达端点应返错")
 	}
 }
-
-// ptrF 浮点指针助手。
-func ptrF(v float64) *float64 { return &v }
 
 // MockAnswers 覆盖表（llm#67）：宿主领域答案由宿主注入，库内不再烘焙
 // route→fault-diagnosis 特判。覆盖优先于通用缺省（firstCandidate）。

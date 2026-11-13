@@ -109,8 +109,7 @@ func matchAny(msg string, markers []string) bool {
 // httpStatus 提取结构化 HTTP 状态码（0 = 未知）。
 // 优先 errors.As 提取 go-openai 的 RequestError；错误链经 eino/网关包装后仍可穿透。
 func httpStatus(err error) int {
-	var re *openai.RequestError
-	if errors.As(err, &re) {
+	if re, ok := errors.AsType[*openai.RequestError](err); ok {
 		return re.HTTPStatusCode
 	}
 	return 0

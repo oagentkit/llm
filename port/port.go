@@ -400,8 +400,7 @@ func ClassifyStatus(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var se *StatusError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*StatusError](err); ok {
 		switch {
 		case se.Status == 429:
 			return true
