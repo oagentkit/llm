@@ -2,6 +2,102 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.22.0] — 2026-11-13
+
+### 修复(obsx)：DrainStreamUsage 跳过 content 累计；input_len/output_len 兑现恒落承诺
+
+- #173：drainStream 加 accumulateContent 开关——DrainStreamUsage 走 false
+  全程不碰 strings.Builder（要 usage 的调用方不再为弃置 content 付 O(内容)
+  拷贝）；流式 onStreamEnd 走 true（#168 预览/长度仍需全文），导出签名不变
+- #174：onStart/onEnd 的 input_len/output_len 恒落——nil 输入帧与
+  out.Message==nil/归一化失败输出帧补 0（Options.PreviewLen 字面承诺，
+  消费方按字段恒在建 schema 不再踩空），预览仍只在有内容时落
+- issue_173_174_test.go：累计开关行为钉 + AllocsPerRun 分配钉 +
+  三形态 nil 帧长度字段恒在回归
+
+### 重构：清仓兼容垫片——删 llm/llm 镜像目录与 PriceOf/PriceOfMatched/CostTracker.Record 三个 Deprecated API（BREAKING）
+
+本仓「为向后兼容保留」的垫片全部删除，v0.22.0 起强制下游走规范 API：
+- 整删 `llm/llm/` 目录（compat.go / doc.go / compat_test.go）——v0.18.0 起的
+  历史 import 路径 `github.com/oagentkit/llm/llm` 兼容镜像（81 个符号的
+  type alias + var 转发）随之消亡
+- 删根包 `PriceOf` / `PriceOfMatched`（Deprecated 转发）与
+  `port.PriceOf` / `port.PriceOfMatched`（最长前缀回落旧实现本体）
+- 删 `port.(*CostTracker).Record`（Deprecated，「每 1K token」单位陷阱）
+  及其私有依赖 costOf；port/cost_test.go 的 TestPriceOf（直接测废弃 API）一并删
+- README / AGENTS 的兼容层章节改为「已删除」迁移指引
+## BREAKING：下游要做什么
+| 已删除 | 迁移到 | 迁移示例 |
+|---|---|---|
+| `import "github.com/oagentkit/llm/llm"` | `import "github.com/oagentkit/llm"` | 只改 import 行，符号同名、调用点零改动（兼容层只是镜像根包） |
+| `PriceOf(pricing, model, p, c)` | `PriceTable.Lookup` / `LookupPrice` | `price, lk := LookupPrice(model); if !lk.Found() { /* 价格未知，别记 0 */ }; cost := price.CostOf(p, c)` |
+| `PriceOfMatched(pricing, model)` | `PriceTable.Lookup` | `price, lk := DefaultPriceTable().Lookup(model)`——`PriceLookup{Key, Kind}` 可观测命中方式，且不再做会误定价的最长前缀回落 |
+| `tracker.Record(m, s, p, c, [2]float64{in1K, out1K})` | `RecordPriced` / `RecordAuto` | 显式单价（每 1M）：`tracker.RecordPriced(m, s, p, c, Price{InputPerM: in1K*1000, OutputPerM: out1K*1000})`；按价表自动计价：`tracker.RecordAuto(m, s, p, c)` |
+删除理由：未配价返回 0 与「免费模型」不可区分、最长前缀回落把同主干异价 SKU
+（gpt-4o-mini 命中 gpt-4o）静默定价错、「每 1K/每 1M」双单位是一个数量级的
+错账来源——三者都是本仓要根除的静默失真，Deprecated 兼容期已满。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.47.1 → v0.48.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.47.1` | `v0.48.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+pkg v0.48.0（2026-11-13 上线）带跨 org Errorf 迁移；本仓 v0.22.0 发版的前置。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+
+- 杂务(deps)：依赖地板追到最新——concurrency v0.35.1 / pkg v0.47.1
+- 杂务(modernize)：二阶段收编 go fix 规则外建议（matrix-tools#213 llm 分片）
+
+- errors.As → errors.AsType：errors.go httpStatus、port/port.go ClassifyStatus
+- maps.Copy：usage.go WithUsageLabels、port/pricing.go WithOverride 拷贝循环
+- new(expr)：decision/decision_test.go 6 处 ptrF 调用点内联为 new(字面量)，删除助手
+- port/pricing.go:200 覆盖键排序收敛：手搓 keys 收集 + slices.SortFunc → slices.SortedFunc(maps.Keys(...), overridePriority)
+- 跳过（不在 #213 清单）：obsx rangeint、client.go minmax
+- 跳过（不等价）：llm 各测试 context.WithCancel 均为立即/中途 cancel，不可换 t.Context()
+- 门禁：gofmt 净、go build/vet -race test 全绿（go1.26 工具链亦 vet 通过）、golangci-lint 0 issues
+
+- 杂务(deps)：依赖地板追到最新——concurrency v0.35.0 + pkg v0.47.1
+
+* chore(deps): 依赖地板追到最新——github.com/oekit/concurrency v0.34.1
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.34.0` | `v0.34.1` |
+| `github.com/oekit/pkg` | `v0.46.0` | `v0.47.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+* chore(deps): 依赖地板追到最新——concurrency v0.35.0 + pkg v0.47.1
+concurrency #291 构造期校验（burst<=0 panic）适配：wrap/rate_test 的
+0 配额限速器改 burst=1 最小合法桶——测试意图（已取消 ctx 立即失败、
+不出网）不变，「构造成功但 Wait 报 ErrBurstTooSmall」的旧形态随 #291 消亡。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.34.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.34.0` | `v0.34.1` |
+| `github.com/oekit/pkg` | `v0.46.0` | `v0.47.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.21.12] — 2026-11-13
 
 ### 修复：sweep2 批量修复 5 单——obsx finish_reason/PreviewLen 契约、port 熔断缺省、llmtest ResponseMeta 与字段契约（#164-#168）
