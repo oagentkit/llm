@@ -10,6 +10,7 @@ import (
 	"context"
 	"github.com/cloudwego/eino/schema"
 	"github.com/oekit/concurrency/async"
+	"maps"
 	"sync/atomic"
 	"time"
 
@@ -51,9 +52,7 @@ func WithUsageLabels(ctx context.Context, labels map[string]string) context.Cont
 	}
 	// 拷贝防调用方后续修改。
 	cp := make(map[string]string, len(labels))
-	for k, v := range labels {
-		cp[k] = v
-	}
+	maps.Copy(cp, labels)
 	return context.WithValue(ctx, labelsKey{}, cp)
 }
 

@@ -29,6 +29,7 @@ package port
 
 import (
 	"errors"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -197,11 +198,7 @@ func newPriceTable(overrides map[string]Price) *PriceTable {
 	}
 	// 覆盖键按优先级**排序后**入库：map 的迭代顺序是随机的，不排序就会让同一份
 	// 配置在不同进程里选出不同的价（见 overridePriority）。
-	keys := make([]string, 0, len(overrides))
-	for k := range overrides {
-		keys = append(keys, k)
-	}
-	slices.SortFunc(keys, overridePriority)
+	keys := slices.SortedFunc(maps.Keys(overrides), overridePriority)
 	for _, k := range keys {
 		t.applyOverride(k, overrides[k])
 	}
@@ -226,9 +223,7 @@ func (t *PriceTable) applyOverride(model string, price Price) {
 // 再入库），同一基座上的优先级规则也相同（见 NewPriceTable 的文档）。
 func (t *PriceTable) WithOverride(model string, price Price) *PriceTable {
 	cp := &PriceTable{table: make(map[string]priceEntry, len(t.table)+1)}
-	for k, v := range t.table {
-		cp.table[k] = v
-	}
+	maps.Copy(cp.table, t.table)
 	cp.applyOverride(model, price)
 	return cp
 }
