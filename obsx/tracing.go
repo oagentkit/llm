@@ -118,15 +118,22 @@ func NewTracingHandler(log logx.Logger, opt Options) callbacks.Handler {
 //
 // 流式累计内容（output_preview/output_len，oagentkit/llm#168）只在包内
 // drainStream 上暴露——导出面保持三返回值不变，不给下游制造签名破坏。
+//
+// 本导出面**不累计 content**（oagentkit/llm#173）：只想要 usage/modelName/
+// finishReason 的调用此前也为整条流付出逐帧 WriteString + Builder 扩容 +
+// String() 整条分配（算完即弃，O(内容) 拷贝压在观测热路径上）——内部经
+// accumulateContent=false 跳过累计，签名不变。
 func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *model.TokenUsage, modelName string, finishReason string) {
-	usage, modelName, finishReason, _ = drainStream(sr)
+	usage, modelName, finishReason, _ = drainStream(sr, false)
 	return usage, modelName, finishReason
 }
 
-// drainStream DrainStreamUsage 的单源实现，额外回填整条流累计的 Content
-// （按 eino 流式契约逐帧 delta 拼接——eino-ext openai 每帧只带增量 Content，
-// 取末帧会得到尾巴而非全文）。调用方负责 Close。
-func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *model.TokenUsage, modelName, finishReason, content string) {
+// drainStream DrainStreamUsage/onStreamEnd 的单源实现，回填整条流累计的
+// Content（按 eino 流式契约逐帧 delta 拼接——eino-ext openai 每帧只带增量
+// Content，取末帧会得到尾巴而非全文）。accumulateContent=false 时全程不碰
+// strings.Builder：只要 usage/model/finish 的调用方零内容拷贝（#173）。
+// 调用方负责 Close。
+func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput], accumulateContent bool) (usage *model.TokenUsage, modelName, finishReason, content string) {
 	var sb strings.Builder
 	for {
 		v, err := sr.Recv()
@@ -147,7 +154,7 @@ func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *mode
 			if fr := finishReasonOf(t.Message); fr != "" {
 				finishReason = fr
 			}
-			if t.Message != nil {
+			if accumulateContent && t.Message != nil {
 				sb.WriteString(t.Message.Content)
 			}
 		case *schema.Message:
@@ -160,7 +167,9 @@ func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage *mode
 			if fr := finishReasonOf(t); fr != "" {
 				finishReason = fr
 			}
-			sb.WriteString(t.Content)
+			if accumulateContent {
+				sb.WriteString(t.Content)
+			}
 		}
 	}
 }
@@ -202,12 +211,25 @@ func (h *TracingHandler) onStart(ctx context.Context, info *callbacks.RunInfo,
 	}
 	// 输入侧预览/长度（oagentkit/llm#168：Options.PreviewLen 承诺的输入半边，
 	// 此前只落输出侧、且全包没有长度字段——「0 = 只落长度」无处落地）。
+	//
+	// input_len **恒落**（oagentkit/llm#174 兑现 Options.PreviewLen 的字面
+	// 承诺「无论取值……恒落」）：nil 输入帧（工具调用帧、部分 provider 的空
+	// 输入完成帧、ConvCallbackInput 归一化失败）此前整个键缺席，按「字段恒在」
+	// 建 schema 的消费方（ClickHouse/jq/缺字段告警）在这些帧上踩空。无内容
+	// = 长度 0，语义自洽；预览仍只在有内容时落。
+	inputLen := 0
+	hasInputPreview := false
+	var inputPreview string
 	if in != nil {
 		text := inputTextOf(in)
-		fields = append(fields, "input_len", utf8.RuneCountInString(text))
+		inputLen = utf8.RuneCountInString(text)
 		if h.opt.PreviewLen > 0 && text != "" {
-			fields = append(fields, "input_preview", preview(text, h.opt.PreviewLen))
+			inputPreview, hasInputPreview = preview(text, h.opt.PreviewLen), true
 		}
+	}
+	fields = append(fields, "input_len", inputLen)
+	if hasInputPreview {
+		fields = append(fields, "input_preview", inputPreview)
 	}
 	h.log.Info("llm.call.start", fields...)
 	return context.WithValue(ctx, startStateKey{}, state)
@@ -221,7 +243,8 @@ func (h *TracingHandler) onEnd(ctx context.Context, info *callbacks.RunInfo,
 	}
 	state, _ := ctx.Value(startStateKey{}).(startState)
 	dur := h.durationSince(state)
-	if out := model.ConvCallbackOutput(output); out != nil && out.Config != nil && out.Config.Model != "" {
+	out := model.ConvCallbackOutput(output)
+	if out != nil && out.Config != nil && out.Config.Model != "" {
 		state.model = out.Config.Model
 	}
 	fields := []any{
@@ -230,7 +253,7 @@ func (h *TracingHandler) onEnd(ctx context.Context, info *callbacks.RunInfo,
 		"model", state.model,
 		"duration_ms", dur.Milliseconds(),
 	}
-	if out := model.ConvCallbackOutput(output); out != nil {
+	if out != nil {
 		if usage := TokenUsageOf(out); usage != nil {
 			fields = append(fields,
 				"prompt_tokens", usage.PromptTokens,
@@ -238,19 +261,29 @@ func (h *TracingHandler) onEnd(ctx context.Context, info *callbacks.RunInfo,
 				"total_tokens", usage.TotalTokens,
 				"reasoning_tokens", usage.CompletionTokensDetails.ReasoningTokens)
 		}
-		if out.Message != nil {
-			// finish_reason：数据就在手边（ResponseMeta），单源 finishReasonOf
-			// 直接复用——非流式路径此前一行未取，length 截断在非流式观测面
-			// 恒不可见（oagentkit/llm#164，#70/#87 修的是流式侧的镜像缺口）。
-			if fr := finishReasonOf(out.Message); fr != "" {
-				fields = append(fields, "finish_reason", fr)
-			}
-			// 长度恒落、预览按 PreviewLen（oagentkit/llm#168）。
-			fields = append(fields, "output_len", utf8.RuneCountInString(out.Message.Content))
-			if h.opt.PreviewLen > 0 {
-				fields = append(fields, "output_preview", preview(out.Message.Content, h.opt.PreviewLen))
-			}
+	}
+	// output_len **恒落**（oagentkit/llm#174 兑现 Options.PreviewLen 的字面
+	// 承诺「无论取值……恒落」）：out 归一化为 nil（ConvCallbackOutput 失败/
+	// 裸输入）或 out.Message==nil（工具调用帧）此前整个键缺席——无内容 = 长度
+	// 0，语义自洽；预览仍只在有内容时落。
+	outputLen := 0
+	hasOutputPreview := false
+	var outputPreview string
+	if out != nil && out.Message != nil {
+		// finish_reason：数据就在手边（ResponseMeta），单源 finishReasonOf
+		// 直接复用——非流式路径此前一行未取，length 截断在非流式观测面
+		// 恒不可见（oagentkit/llm#164，#70/#87 修的是流式侧的镜像缺口）。
+		if fr := finishReasonOf(out.Message); fr != "" {
+			fields = append(fields, "finish_reason", fr)
 		}
+		outputLen = utf8.RuneCountInString(out.Message.Content)
+		if h.opt.PreviewLen > 0 {
+			outputPreview, hasOutputPreview = preview(out.Message.Content, h.opt.PreviewLen), true
+		}
+	}
+	fields = append(fields, "output_len", outputLen)
+	if hasOutputPreview {
+		fields = append(fields, "output_preview", outputPreview)
 	}
 	if h.opt.SlowThreshold > 0 && dur > h.opt.SlowThreshold {
 		h.log.Warn("llm.call.slow", fields...)
@@ -295,7 +328,9 @@ func (h *TracingHandler) onStreamEnd(ctx context.Context, info *callbacks.RunInf
 	// 排空会把真流式阻塞成批出（第九轮审计 C 级，与 llm.NewUsageHandler 同修）
 	async.GoSafe(func() {
 		defer output.Close()
-		usage, modelName, finish, content := drainStream(output)
+		// 流式 end 要 output_preview/output_len（#168），这里需要 content：
+		// accumulateContent=true；只要 usage 的 DrainStreamUsage 走 false（#173）。
+		usage, modelName, finish, content := drainStream(output, true)
 		// usage 缺失（未开 IncludeUsage 的 provider）也落 end——与非流式 onEnd
 		// 行为一致，start/end 配对不破（第十轮审计）
 		h.logUsageEnd(ctx, info, usage, modelName, finish, content)
