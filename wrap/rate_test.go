@@ -30,9 +30,11 @@ func TestRateModelGenerateForwards(t *testing.T) {
 
 func TestRateModelRespectsCancel(t *testing.T) {
 	inner := &fakeChatModel{}
-	// 0 配额限速器 + 已取消 ctx：Wait 立即返回错误（burst=0 在 oekit 是
-	// ErrBurstTooSmall、取消态是 ctx.Err()——两者都立即失败），请求不出网
-	rm := NewRateModel(inner, ratelimit.NewTokenBucketFloat(0.0001, 0)).(*RateModel)
+	// 近零配额限速器 + 已取消 ctx：Wait 立即返回错误（取消态走 ctx.Err()），
+	// 请求不出网。burst=1 是新契约下的最小合法桶——concurrency #291 起
+	// burst<=0 在构造期 panic（x/time/rate 语义下 burst<1 即恒拒，
+	// 没有合法使用场景），不再有「构造成功但 Wait 报 ErrBurstTooSmall」的形态
+	rm := NewRateModel(inner, ratelimit.NewTokenBucketFloat(0.0001, 1)).(*RateModel)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := rm.Generate(ctx, []*schema.Message{bigTool(schema.User, 10)}); err == nil {
