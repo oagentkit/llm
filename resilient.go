@@ -451,13 +451,17 @@ func (r *Resilient) tryProvider(ctx context.Context, stage string, p Provider, i
 // 按该 Provider 窗口裁剪 → 委托 Client.generateRetry 单模型重试骨架
 // （每次尝试独立受 AttemptTimeout 约束；chainFallback——上层链有备选模型）。
 // prepare 复制消息 + 装配单模型 Client + fitInput（Generate 路径专用——
-// generateRetry 直接消费已裁剪副本）。JSON 路径走 GenerateJSON 自身的 copy+fit，
-// 不经此函数，避免双份裁剪。
-func (r *Resilient) prepare(p Provider, msgs []*schema.Message) (*Client, []*schema.Message) {
+// generateRetry 直接消费已裁剪副本）。fitInput 收敛失败返回可诊断错误
+// （llm#188：错误文案带 context too long marker → 确定性失败 → 切下一环，
+// 不在本环重试白烧）。JSON 路径走 GenerateJSON 自身的 copy+fit，不经此函数，
+// 避免双份裁剪。
+func (r *Resilient) prepare(p Provider, msgs []*schema.Message) (*Client, []*schema.Message, error) {
 	msgsCopy := copyMsgs(msgs)
 	c := r.buildClient(p)
-	c.fitInput(msgsCopy)
-	return c, msgsCopy
+	if err := c.fitInput(msgsCopy); err != nil {
+		return nil, nil, err
+	}
+	return c, msgsCopy, nil
 }
 
 // attemptTimeoutOf 提取 Provider 声明的单次尝试超时（未声明 = 0）。
@@ -469,7 +473,10 @@ func attemptTimeoutOf(p Provider) time.Duration {
 }
 
 func (r *Resilient) tryOneProvider(ctx context.Context, p Provider, stage string, msgs []*schema.Message) (*schema.Message, error) {
-	c, msgsCopy := r.prepare(p, msgs)
+	c, msgsCopy, err := r.prepare(p, msgs)
+	if err != nil {
+		return nil, err
+	}
 
 	// 单次尝试超时：每次尝试独立计时。不能在循环外创建一次——否则 deadline
 	// 覆盖全部重试 + 退避睡眠，首次尝试耗满后重试全部形同虚设。

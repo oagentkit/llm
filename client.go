@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -115,7 +116,8 @@ func estimateTokens(s string) int { return textutil.EstTokensCJK(s) }
 // 预算短路形同虚设）与三组多模态字段的文本部件同样计入。口径对齐
 // textx/compact 的 msgTokens（同 org 两套估算不许分叉：彼处同样正文 +
 // ToolCalls 双计），多模态部件按文本计——图片/音频 URL 的真实 token 由
-// provider usage 回传兜底，本地估算只做保守下界。
+// provider usage 回传兜底，本地估算只做保守下界。字段面与 MsgRuneCount
+// （rune 口径，#187 起裁剪面共用）单源对齐。
 func estimateMsgTokens(msgs []*schema.Message) int {
 	total := 0
 	for _, m := range msgs {
@@ -135,6 +137,42 @@ func estimateMsgTokens(msgs []*schema.Message) int {
 		for _, part := range m.AssistantGenMultiContent {
 			total += estimateTokens(part.Text)
 		}
+	}
+	return total
+}
+
+// MsgRuneCount 单消息的 rune 口径（#187）：正文 Content 之外，ToolCalls（工具
+// 名 + 参数 JSON——大入参工具调用只算正文会系统性低估，窗口治理形同虚设）与
+// 三组多模态字段的文本部件同样计入。字段面与 estimateMsgTokens（token 口径）
+// 单源对齐：记账与裁剪（fitInputFor / wrap.FitMessages 的 runeTotal/msgRunes）
+// 两条出口同一口径——此前「记账算了、裁剪没算」，tool-heavy 会话的窗口治理
+// 失明。多模态非文本部件（图片/音频）的真实 token 由 provider usage 回传兜底，
+// 本计数只做保守下界。
+func MsgRuneCount(m *schema.Message) int {
+	if m == nil {
+		return 0
+	}
+	n := utf8.RuneCountInString(m.Content)
+	for _, tc := range m.ToolCalls {
+		n += utf8.RuneCountInString(tc.Function.Name) + utf8.RuneCountInString(tc.Function.Arguments)
+	}
+	for _, part := range m.MultiContent {
+		n += utf8.RuneCountInString(part.Text)
+	}
+	for _, part := range m.UserInputMultiContent {
+		n += utf8.RuneCountInString(part.Text)
+	}
+	for _, part := range m.AssistantGenMultiContent {
+		n += utf8.RuneCountInString(part.Text)
+	}
+	return n
+}
+
+// MsgsRuneCount 消息序列的 rune 总量（MsgRuneCount 逐条求和）。
+func MsgsRuneCount(msgs []*schema.Message) int {
+	total := 0
+	for _, m := range msgs {
+		total += MsgRuneCount(m)
 	}
 	return total
 }
@@ -176,7 +214,9 @@ func (c *Client) account(stage string, in []*schema.Message, out *schema.Message
 func (c *Client) Generate(ctx context.Context, stage string, msgs []*schema.Message) (*schema.Message, error) {
 	ctx = obsx.WithStage(ctx, stage)
 	msgs = copyMsgs(msgs) // fitInput 原地替换元素，不能污染调用方的切片
-	c.fitInput(msgs)
+	if err := c.fitInput(msgs); err != nil {
+		return nil, err
+	}
 	return c.generateFitted(ctx, stage, msgs)
 }
 
@@ -427,7 +467,9 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 				schema.UserMessage(fmt.Sprintf(hint, lastErr)),
 			)
 		}
-		c.fitInput(callMsgs)
+		if err := c.fitInput(callMsgs); err != nil {
+			return fmt.Errorf("llm: %s %w", stage, err)
+		}
 		resp, attempts, err := c.generateRetry(ctx, stage, callMsgs, pol)
 		if err != nil {
 			return fmt.Errorf("llm: %s 调用失败（已重试 %d 次）: %w", stage, attempts-1, err)
@@ -448,42 +490,148 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 	return fmt.Errorf("llm: %s JSON 解析失败（已带错误重试 1 次）: %w", stage, lastErr)
 }
 
-// fitInput 发送前输入自守恒：总输入超 (窗口-输出预留)×2×0.9 时，
-// 截断最长的 user 消息并留痕（兜底层，正常轮不到）。
-func (c *Client) fitInput(msgs []*schema.Message) {
-	c.fitInputFor(c.MaxOutputTokens, msgs)
+// fitNoteMargin 截断注记余量（rune）：keep 在「预算差额」之外再扣一份，截完
+// 的「正文+注记」总长才真正落在预算内——不扣则截完仍略超 limit（wrap/fit.go
+// L2 同款收口，llm#188 第三项）。
+const fitNoteMargin = 32
+
+// fitNoteFloor 候选消息的 rune 数下限：低于此值的消息截断后「正文+注记」不缩
+// 反涨（注记本身就 ~20 rune），参与裁剪即零进展死循环——不选（wrap L3 的
+// 「置换后必须变小」守卫同款，第八轮审计）。
+var fitNoteFloor = utf8.RuneCountInString("\n"+textutil.TruncNote("§", 0, textutil.FitInputNote)) + 4
+
+// fitInput 发送前输入自守恒：总输入超 (窗口-输出预留)×2×0.9 时，截断最长的
+// user 消息并留痕（兜底层，正常轮不到）。返回错误 = 全部可裁对象穷尽后仍超限
+// （llm#188：不再静默放行——错误文案带 context too long marker，被
+// ClassifyLLMError 判成确定性失败：单客户端立即失败不重试，降级链切换更大
+// 窗口的备选模型；把失败从「provider 侧报错」提前到「本地可诊断失败」）。
+func (c *Client) fitInput(msgs []*schema.Message) error {
+	return c.fitInputFor(c.MaxOutputTokens, msgs)
 }
 
 // fitInputFor 指定输出预留额的输入自守恒（fitInput 的参数化形态）。截断提升轮
 // 以 1.5 倍输出上限重算预算再裁剪（llm#83）——预留只认「本轮实际声明的输出
 // 上限」，不认构造时的缺省值。
-func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) {
+//
+// 裁剪策略（llm#187/#188）：
+//   - 计量口径 = MsgRuneCount（Content + ToolCalls + 三组多模态文本部件），
+//     与 estimateMsgTokens 记账同字段面——tool-heavy 会话不再只按正文算总量
+//     （此前 total 远小于真实发送量 → 判「未超限」直通 → provider 侧
+//     context length exceeded，还被分类成确定性失败放弃重试）；
+//   - 先截最长 user（与 wrap L2 同款：keep 扣注记余量，截完即入窗）；
+//   - 裁后复查总量，仍未入窗回环迭代截最长可裁正文（User/Tool/Assistant，
+//     对齐 wrap L3：错误/提醒结果保护不裁、system 提示词不裁）。ToolCalls
+//     参数 JSON 不改写（协议配对完整性优先）——ToolCalls 占大头且无可裁正文
+//     时收敛失败，返回可诊断错误而非静默直通。
+func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) error {
 	if c.ContextTokens <= 0 {
-		return
+		return nil
 	}
 	// 预算公式单源 textutil.FitCharsLimit（第十轮收口：与 wrap.FitModel 双份
 	// 手写漂移无编译期信号；CJK 感见 ×3/2 语义见彼处注释）
 	limit := textutil.FitCharsLimit(c.ContextTokens, outReserve)
 	if limit <= 0 {
-		return
+		return nil
 	}
-	// 只扫一遍求 total/最长 user：免 []rune 物化与 lens 切片
-	total, longest, longestN := 0, -1, 0
+	sizes := make([]int, len(msgs))
+	total := 0
 	for i, m := range msgs {
-		n := utf8.RuneCountInString(m.Content)
-		total += n
-		if m.Role == schema.User && (longest < 0 || n > longestN) {
-			longest, longestN = i, n
+		sizes[i] = MsgRuneCount(m)
+		total += sizes[i]
+	}
+	if total <= limit {
+		return nil
+	}
+	// 已裁对象不再重选（裁过的消息只剩注记头，重复裁剪零进展）
+	skip := make([]bool, len(msgs))
+	// L2：截最长 user（keep 扣注记余量——此前不扣，截完仍略超限照发）
+	if idx := longestIndex(msgs, sizes, skip, schema.User); idx >= 0 {
+		keep := max(limit-(total-sizes[idx])-fitNoteMargin, 0)
+		total -= trimMsgContent(msgs, sizes, idx, keep)
+		if total <= limit {
+			return nil
+		}
+		skip[idx] = true
+	}
+	// L3 回环：仍未入窗 → 迭代截最长可裁（User/Tool/Assistant）正文直至入窗
+	// 或无可裁对象。此前只裁一条、裁完不复查：「其余消息之和本身已 ≥ limit」
+	// 时 user 被削成注记、总量仍远超 limit 却已出函数（llm#188）。
+	for total > limit {
+		big := longestTrimable(msgs, sizes, skip)
+		if big < 0 {
+			break
+		}
+		keep := max(sizes[big]-(total-limit)-fitNoteMargin, 0)
+		total -= trimMsgContent(msgs, sizes, big, keep)
+		if total <= limit {
+			return nil
+		}
+		skip[big] = true // 该消息已裁到注记头，本轮裁剪无进展空间
+	}
+	return fmt.Errorf("llm: 输入自守恒失败：裁剪全部可裁正文后仍超窗口预算（%d > %d rune，context too long）——请缩小输入或换更大窗口的模型",
+		total, limit)
+}
+
+// longestIndex 指定角色中 rune 数最大的消息下标（-1 = 无）；已跳过（skip）的
+// 不参与。
+func longestIndex(msgs []*schema.Message, sizes []int, skip []bool, role schema.RoleType) int {
+	idx := -1
+	for i, m := range msgs {
+		if m == nil || skip[i] || m.Role != role {
+			continue
+		}
+		if idx < 0 || sizes[i] > sizes[idx] {
+			idx = i
 		}
 	}
-	if total <= limit || longest < 0 {
-		return
+	return idx
+}
+
+// longestTrimable L3 候选：User/Tool/Assistant 中 rune 数最大且可裁（高于注记
+// 下限、非保护结果）的消息下标（-1 = 无）。system 提示词不裁——指令被腰斩的
+// 代价不可控，宁可交可诊断错误。
+func longestTrimable(msgs []*schema.Message, sizes []int, skip []bool) int {
+	big := -1
+	for i, m := range msgs {
+		if m == nil || skip[i] || sizes[i] <= fitNoteFloor {
+			continue
+		}
+		switch m.Role {
+		case schema.User, schema.Tool, schema.Assistant:
+		default:
+			continue
+		}
+		if isProtectedResult(m.Content) {
+			continue // 错误/提醒结果保护（wrap L3 同款）：模型自纠依据不裁
+		}
+		if big < 0 || sizes[i] > sizes[big] {
+			big = i
+		}
 	}
-	keep := limit - (total - longestN)
-	if keep < 0 {
-		keep = 0
+	return big
+}
+
+// trimMsgContent 就地截断 msgs[idx] 的 Content 为 keep rune + 留痕注记，返回
+// 消息总 rune 的实际降幅（0 = 无进展——keep 不短于原正文或注记反涨；不动原
+// 消息，调用方据此把该候选置 skip 收口，防死循环）。浅拷贝替换元素指针：
+// fitInput 契约是只改副本、不污染调用方切片。
+func trimMsgContent(msgs []*schema.Message, sizes []int, idx int, keep int) int {
+	m := msgs[idx]
+	cloned := *m
+	cloned.Content = "\n" + textutil.TruncNote(m.Content, keep, textutil.FitInputNote)
+	n := MsgRuneCount(&cloned)
+	delta := sizes[idx] - n
+	if delta <= 0 {
+		return 0
 	}
-	cloned := *msgs[longest]
-	cloned.Content = "\n" + textutil.TruncNote(msgs[longest].Content, keep, textutil.FitInputNote)
-	msgs[longest] = &cloned
+	msgs[idx] = &cloned
+	sizes[idx] = n
+	return delta
+}
+
+// isProtectedResult 错误/提醒结果保护（wrap/fit.go L3 同款语义，根包侧镜像）：
+// 携带提醒信封（含 tool-error 标记）的结果是模型自纠与规则遵循的依据，
+// 窗口裁剪不碰。两处实现须保持一致（wrap 不被根包导入，无法单源）。
+func isProtectedResult(content string) bool {
+	return strings.Contains(content, "<system-reminder>") || strings.Contains(content, "【tool-error】")
 }
