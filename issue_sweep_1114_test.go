@@ -5,7 +5,11 @@ package llm
 // #186/#191(port 侧) 的用例在 port 包，#196 在 llmtest 包，#187(wrap 侧) 在 wrap 包。
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"github.com/cloudwego/eino/schema"
+	"github.com/meguminnnnnnnnn/go-openai"
 	"strings"
 	"testing"
 	"time"
@@ -146,5 +150,49 @@ func TestBackoffCappedTierStaysSpread_Issue189(t *testing.T) {
 	}
 	if len(seen) < 8 {
 		t.Fatalf("封顶档应保持打散，64 个样本只出现 %d 个不同值", len(seen))
+	}
+}
+
+// --- #190 IsTransientStreamError 显式白名单 ---
+
+// TestIsTransientStreamErrorUnknownPermanent_Issue190 未知永久错误（无 marker
+// 文案）不再缺省瞬态——此前最多重开流 10 次、每轮重烧 token 与延迟。
+func TestIsTransientStreamErrorUnknownPermanent_Issue190(t *testing.T) {
+	permanent := []error{
+		errors.New("content policy violation"),
+		errors.New("function calling is not supported by this model"),
+		errors.New("model deprecated by provider"),
+		errors.New("insufficient_quota: you have run out of credits"),
+	}
+	for _, e := range permanent {
+		if IsTransientStreamError(e) {
+			t.Errorf("未知永久错误不应判瞬态: %v", e)
+		}
+	}
+}
+
+// TestIsTransientStreamErrorStructured_Issue190 结构化瞬态类型：ctx 超时与
+// 429/5xx 状态码瞬态；其余 4xx 确定性失败不重开流。
+func TestIsTransientStreamErrorStructured_Issue190(t *testing.T) {
+	transient := []error{
+		fmt.Errorf("attempt: %w", context.DeadlineExceeded),
+		&openai.RequestError{HTTPStatusCode: 429, Err: errors.New("rate limited")},
+		&openai.RequestError{HTTPStatusCode: 503, Err: errors.New("upstream")},
+		errors.New("HTTP 502"),
+		errors.New("connection reset by peer"),
+	}
+	for _, e := range transient {
+		if !IsTransientStreamError(e) {
+			t.Errorf("应判瞬态: %v", e)
+		}
+	}
+	permanent := []error{
+		&openai.RequestError{HTTPStatusCode: 400, Err: errors.New("bad shape")},
+		context.Canceled,
+	}
+	for _, e := range permanent {
+		if IsTransientStreamError(e) {
+			t.Errorf("不应判瞬态: %v", e)
+		}
 	}
 }
