@@ -180,6 +180,17 @@ type timeoutProvider interface {
 	AttemptTimeout() time.Duration
 }
 
+// probeBudgetProvider 可选能力：Provider 显式声明单次尝试的**真实在途上限**
+// （llm#197）。注入 HTTPClient 的 provider 的 AttemptTimeout() 恒为 0（超时归
+// 注入方 own，llm#143）——链层的 BreakerProbeTimeout 缺省推导失去真实在途
+// 上限，塌回 90s 缺省：宿主注入长超时（10–15min 长生成）时半开探测的真实
+// 在途可超探测时限，被判失联并放行并发新探测，半开「单探测隔离」失效
+// （v0.10.28 审计修复的洞在注入路径上原样回来）。实现本接口把注入方的 HTTP
+// 超时（或自定的在途预算）声明出来，推导才有据。
+type probeBudgetProvider interface {
+	ProbeBudget() time.Duration
+}
+
 // Resilient 弹性 LLM 客户端。
 //
 // 与 *Client 方法签名一致（满足 Generator），可作 drop-in 替换。
@@ -223,10 +234,18 @@ func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error)
 			return nil, fmt.Errorf("llm: Resilient 链上第 %d 个 Provider 为 nil（含 typed-nil，条件装配请过滤后再入链）", i)
 		}
 	}
-	// 尝试预算 = max(90s, 链上 provider 声明的单次尝试限时)——探测时限推导须
-	// 覆盖最坏在途（长超时配置下半开隔离才不失效）
+	// 尝试预算 = max(90s, 链上 provider 声明的单次尝试限时/真实在途上限)——
+	// 探测时限推导须覆盖最坏在途（长超时配置下半开隔离才不失效）。
+	// ProbeBudget 优先（llm#197）：注入 HTTPClient 的 provider 的
+	// AttemptTimeout() 恒为 0，真实在途上限只能由注入方经 ProbeBudget 声明。
 	budget := 90 * time.Second
 	for _, p := range chain.Providers {
+		if pb, ok := p.(probeBudgetProvider); ok {
+			if d := pb.ProbeBudget(); d > budget {
+				budget = d
+				continue
+			}
+		}
 		if tp, ok := p.(timeoutProvider); ok {
 			if d := tp.AttemptTimeout(); d > budget {
 				budget = d
@@ -243,6 +262,15 @@ func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error)
 			breaker.WithProbeTimeout(cfg.BreakerProbeTimeout)),
 	}, nil
 }
+
+// BreakerProbeTimeout 返回生效的熔断半开探测时限（llm#197 观测面）。未显式
+// 配置时按「单模型最坏在途」推导：(RetriesPerModel+1) × (MaxDelay + 尝试预算)，
+// 尝试预算 = 链上 provider 声明的 ProbeBudget/AttemptTimeout 与 90s 下限的
+// 较大者。注入 HTTPClient 且未声明 ProbeBudget（或声明 0 = 注入方依赖请求级
+// ctx、在途上限未知）时尝试预算塌回 90s 缺省——宿主真实在途可超推导值时
+// **必须显式配置** ResilientConfig.BreakerProbeTimeout，否则半开「单探测隔离」
+// 可能失效（探测被判失联并放行并发新探测）。
+func (r *Resilient) BreakerProbeTimeout() time.Duration { return r.cfg.BreakerProbeTimeout }
 
 // LastModel 返回最近一次成功调用使用的模型名（无成功调用返回空）。
 func (r *Resilient) LastModel() string {

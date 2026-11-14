@@ -23,6 +23,9 @@ type OpenAIProvider struct {
 	// 归注入方 own，AttemptTimeout() 返回 0——Resilient 链不再叠加 per-attempt
 	// 截止，与「本仓不再叠加自己的 Timeout」的文档承诺一致。
 	injectedHTTPClient bool
+	// injectedClientTimeout 注入 Client 的整体超时（#197）：ProbeBudget 的
+	// 取值来源——链层探测时限缺省推导的真实在途上限。
+	injectedClientTimeout time.Duration
 
 	chatModel model.BaseChatModel
 }
@@ -82,13 +85,14 @@ func NewOpenAIProvider(ctx context.Context, cfg OpenAIProviderConfig) (*OpenAIPr
 	}
 
 	return &OpenAIProvider{
-		modelName:          cfg.Model,
-		contextTokens:      cfg.ContextTokens,
-		maxOutputTokens:    cfg.MaxOutputTokens,
-		timeout:            cfg.Timeout,
-		costPer1K:          [2]float64{cfg.CostPer1KPrompt, cfg.CostPer1KCompletion},
-		injectedHTTPClient: cfg.HTTPClient != nil,
-		chatModel:          chatModel,
+		modelName:             cfg.Model,
+		contextTokens:         cfg.ContextTokens,
+		maxOutputTokens:       cfg.MaxOutputTokens,
+		timeout:               cfg.Timeout,
+		costPer1K:             [2]float64{cfg.CostPer1KPrompt, cfg.CostPer1KCompletion},
+		injectedHTTPClient:    cfg.HTTPClient != nil,
+		injectedClientTimeout: cfg.httpClientTimeout(),
+		chatModel:             chatModel,
 	}, nil
 }
 
@@ -134,6 +138,17 @@ func (c *OpenAIProviderConfig) httpClient() *http.Client {
 	return &derived
 }
 
+// httpClientTimeout 注入 Client 的整体超时（llm#197；0 = 未注入或注入方未设
+// 整体超时——在途上限由请求级 ctx 决定，本地无从推断，链层推导按「未知」
+// 处理）。读注入 Client 自身的 Timeout 而非 cfg.Timeout：注入后 cfg.Timeout
+// 对 HTTP 层无效（llm#143）。
+func (c *OpenAIProviderConfig) httpClientTimeout() time.Duration {
+	if c.HTTPClient == nil {
+		return 0
+	}
+	return c.HTTPClient.Timeout
+}
+
 // chatModelConfig 组装 eino openai.ChatModelConfig（maxTokens 指针化）。
 func (c *OpenAIProviderConfig) chatModelConfig(httpClient *http.Client) *openai.ChatModelConfig {
 	var maxTokens *int
@@ -168,6 +183,20 @@ func (p *OpenAIProvider) CostPer1KTokens() (float64, float64) {
 func (p *OpenAIProvider) AttemptTimeout() time.Duration {
 	if p.injectedHTTPClient {
 		return 0
+	}
+	return p.timeout
+}
+
+// ProbeBudget 单次尝试的**真实在途上限**（llm#197 可选能力面）：注入 HTTPClient
+// 后 AttemptTimeout() 恒为 0（llm#143），Resilient 的 BreakerProbeTimeout 缺省
+// 推导改读本口——取注入 Client 的整体 Timeout。0 = 注入方未设整体超时（在途
+// 上限由请求级 ctx 决定，本地无从推断）：链层推导塌回 90s 缺省，宿主真实在途
+// 更长时必须显式配置 ResilientConfig.BreakerProbeTimeout，否则熔断半开「单
+// 探测隔离」可能失效（见 Resilient.BreakerProbeTimeout 注释）。未注入时与
+// AttemptTimeout 同值（per-attempt 截止与探测时限推导共用同一来源）。
+func (p *OpenAIProvider) ProbeBudget() time.Duration {
+	if p.injectedHTTPClient {
+		return p.injectedClientTimeout
 	}
 	return p.timeout
 }

@@ -346,6 +346,55 @@ func TestUsageRecordTotalFallback_Issue195(t *testing.T) {
 	}
 }
 
+// --- #197 ProbeBudget 能力面 ---
+
+// TestProbeBudgetFeedsBreakerProbeTimeout_Issue197 注入 HTTPClient 的 provider
+// AttemptTimeout()=0（llm#143），探测时限缺省推导改读 ProbeBudget——注入方
+// 长超时（10min）必须被推导面看见，半开单探测隔离不失效。
+func TestProbeBudgetFeedsBreakerProbeTimeout_Issue197(t *testing.T) {
+	injected, err := NewOpenAIProvider(context.Background(), OpenAIProviderConfig{
+		BaseURL: "http://llm-issue197.invalid", APIKey: "k", Model: "m",
+		HTTPClient: &http.Client{Timeout: 10 * time.Minute},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := injected.AttemptTimeout(); got != 0 {
+		t.Fatalf("注入后 AttemptTimeout 应为 0（llm#143）: %v", got)
+	}
+	if got := injected.ProbeBudget(); got != 10*time.Minute {
+		t.Fatalf("ProbeBudget 应取注入 Client 的 Timeout: %v", got)
+	}
+	r, err := NewResilient(NewFallbackChain(injected), ResilientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// (RetriesPerModel+1) × (MaxDelay + 10min) = 3 × 11min
+	if got, want := r.BreakerProbeTimeout(), 3*(30*time.Second+10*time.Minute); got != want {
+		t.Fatalf("探测时限推导应含注入方在途上限: got %v want %v", got, want)
+	}
+
+	// 未注入：ProbeBudget 与 AttemptTimeout 同源（60s 缺省）——推导面不变。
+	plain, err := NewOpenAIProvider(context.Background(), OpenAIProviderConfig{
+		BaseURL: "http://llm-issue197.invalid", APIKey: "k", Model: "m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.ProbeBudget(); got != plain.AttemptTimeout() {
+		t.Fatalf("未注入时 ProbeBudget 应与 AttemptTimeout 同值: %v vs %v", got, plain.AttemptTimeout())
+	}
+}
+
+// TestResilientBreakerProbeTimeoutUnchanged_Issue197 无 ProbeBudget 的链：
+// 推导面维持既有口径（90s 下限），护栏防回归。
+func TestResilientBreakerProbeTimeoutUnchanged_Issue197(t *testing.T) {
+	r := newResilient(t, newFakeProvider("p", llmtest.Resp{Content: "ok"}))
+	if got, want := r.BreakerProbeTimeout(), 3*(5*time.Millisecond+90*time.Second); got != want {
+		t.Fatalf("缺省推导应维持 90s 下限口径: got %v want %v", got, want)
+	}
+}
+
 // --- #193 StageRouter.Use("") 静默全局兜底 ---
 
 // TestStageRouterUseRejectsEmptyStage_Issue193 Use("") panic（空串前缀恒命中
