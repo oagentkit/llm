@@ -2,6 +2,67 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.23.0] — 2026-11-14
+
+### 修复(llm)：ProbeBudget 能力面——探测时限推导看得见注入方在途上限
+
+- e04ea11
+
+### 修复(llmtest)：StreamContent 捷径不消费脚本条目——混合桩不错位
+
+- 57c3a7f
+
+### 修复(llm)：UsageRecord.TotalTokens 缺席兜底重算为分项和
+
+- f3be696
+
+### 修复(llm)：StageRouter.Use 拒绝空 stage——空串前缀不再静默接管 def
+
+- ee79463
+
+### 修复(port)：窄接口链预算逐环节+环内重试前复查
+
+- faed65f
+
+### 修复(llm)：Retry-After sink 单轮生命周期 + 截断收手先于退避等待(#192,#194)
+
+- bb4487c
+
+### 修复(llm)：失败面按估算记账——预算/成本对失败面不再失明
+
+- 5dc9164
+
+### 修复(recovery)：IsTransientStreamError 改显式白名单——未知永久错误不重开流
+
+- 4ca396a
+
+### 修复(llm)：退避封顶档改软上限——429 群撞打散在最需要处不归零
+
+- e895be6
+
+### 修复(llm)：fit 裁剪与记账同字段面——回环收敛+无可裁给可诊断错误(#187,#188)
+
+- a149a38
+
+- 杂务(deps)：依赖地板追到最新——textx v0.12.0 / concurrency v0.36.1
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.36.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.35.1` | `v0.36.0` |
+| `github.com/oekit/logx` | `v0.10.0` | `v0.11.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
+- 测试：回归测试文件 import 排序 gofmt 收口(#186-#197)
+
 ## [v0.22.0] — 2026-11-13
 
 ### 修复(obsx)：DrainStreamUsage 跳过 content 累计；input_len/output_len 兑现恒落承诺
