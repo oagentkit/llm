@@ -8,18 +8,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/cloudwego/eino/callbacks"
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
-	"github.com/meguminnnnnnnnn/go-openai"
-	"github.com/oagentkit/llm/llmtest"
-	"github.com/oekit/pkg/httpjson"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+	openai "github.com/meguminnnnnnnnn/go-openai"
+
+	"github.com/oagentkit/llm/llmtest"
+	"github.com/oekit/pkg/httpjson"
 )
 
 // --- #187 fit 裁剪与记账同字段面（Content + ToolCalls + 多模态文本部件） ---
