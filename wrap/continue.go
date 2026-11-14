@@ -118,9 +118,11 @@ func (m *ContinueModel) Generate(ctx context.Context, input []*schema.Message, o
 // mergeContinueMeta 续写轮 meta 合并（llm#82）：FinishReason 以末轮为准
 // （下轮截断判定取最新语义）；Usage 逐轮累加——prompt 取首轮（整段上下文按
 // 一份计，续写轮重复回传的部分不重复记账），completion 求和（真实总输出），
-// total 重算为 prompt+completion 保持自洽。此前以末轮 meta 整体覆盖，首轮
-// （通常占输出大头）的 usage 从最终消息上消失——下游按 ResponseMeta.Usage
-// 记账的消费方对「截断+续写」只计末轮，恰在长输出（成本最高）场景失真。
+// total 重算为 prompt+completion 保持自洽（llm#195 起该口径与根包
+// recordFromUsage 的「total 缺席兜底重算」互指同源）。此前以末轮 meta 整体
+// 覆盖，首轮（通常占输出大头）的 usage 从最终消息上消失——下游按
+// ResponseMeta.Usage 记账的消费方对「截断+续写」只计末轮，恰在长输出
+// （成本最高）场景失真。
 func mergeContinueMeta(first, last *schema.ResponseMeta) *schema.ResponseMeta {
 	if last == nil {
 		// 末轮无 meta：保持置 nil 的旧语义——isTruncated 随之落空、续写循环

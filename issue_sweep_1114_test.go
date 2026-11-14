@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/meguminnnnnnnnn/go-openai"
 	"github.com/oagentkit/llm/llmtest"
@@ -323,6 +325,24 @@ func TestTruncatedGiveUpBeforeBackoff_Issue194(t *testing.T) {
 	}
 	if m.Calls != 2 {
 		t.Fatalf("首次截断 + 提升轮仍截断即收手，应恰 2 次调用，实际 %d（收手晚于退避等待会多烧一轮）", m.Calls)
+	}
+}
+
+// --- #195 TotalTokens 兜底重算 ---
+
+// TestUsageRecordTotalFallback_Issue195 provider 只回分项（total 缺席）时
+// Total 兜底重算为 prompt+completion——与 mergeContinueMeta 同一口径。
+func TestUsageRecordTotalFallback_Issue195(t *testing.T) {
+	info := &callbacks.RunInfo{Type: "OpenAI"}
+	rec := recordFromUsage(context.Background(), info,
+		&model.TokenUsage{PromptTokens: 100, CompletionTokens: 50}, "")
+	if rec.TotalTokens != 150 {
+		t.Fatalf("total 缺席应兜底重算 150，实际 %d", rec.TotalTokens)
+	}
+	rec = recordFromUsage(context.Background(), info,
+		&model.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 200}, "")
+	if rec.TotalTokens != 200 {
+		t.Fatalf("provider 报了 total 不得覆盖: %d", rec.TotalTokens)
 	}
 }
 
