@@ -2,6 +2,38 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.24.0] — 2026-11-14
+
+### 新增(wrap)：下沉在飞闸与熔断模型装饰器
+
+把 bianque 手搓的 eino 模型装饰器收编进 wrap 装饰器集，内核单源零新增
+依赖边（syncx.KeyedGate / concurrency/breaker 均为既有直接依赖，只补
+eino BaseChatModel 装饰壳）：
+- GovernorModel 在飞闸：按 key 名额封顶，流式名额覆盖整段消费；
+  Gate nil 直通。
+- BreakerModel 熔断：按名熔断器，开闸快速失败（先于限速/排队），回填
+  纪律沿用 port.Breakers（成功 SuccessGen / 用户中止 AbandonGen 不计
+  失败 / 其余 FailureGen）；流式回填覆盖整段消费（干净 EOF 成功、流中
+  错误按上款分类、消费方提前收流按结果未知 Abandon）。
+契约与文档：
+- WithTools 派生共享状态进包契约（doc.go）：eino ReAct 每轮重新派生带
+  工具模型，装饰器必须原样传递状态指针——「派生即新状态」= 闸门/熔断
+  失效；两者均有测试钉死（跨派生连挂累积、共享名额池）。
+- IsCallbacksEnabled 透传按 wrap 既有装饰器口径（llm#86），避免 usage
+  双计。
+- doc.go 推荐组装顺序扩为 Rate→Governor→Breaker→Fit→Continue（内→外）
+  并给出逐层理由（闸门名额覆盖完整发送尝试；开闸快速失败先于限速等待
+  与排队；续写轮再入全栈）。
+API 面：NewGovernorModel(inner, name, gate) / NewBreakerModel(inner,
+name, trip, cooldown, opts...breaker.BreakerOption)。trip/cooldown ≤0
+取家族缺省（port.DefaultBreakerTrip=3 / DefaultBreakerCooldown=5min，
+ResilientConfig.fillDefaults 同口径）；opts 后置可覆盖基线。
+测试：装饰转发、在飞封顶与排队中止、流式名额覆盖（synctest 虚拟时钟）、
+trip/cooldown/半开探测（synctest 假时钟）、用户取消 Abandon、派生共享
+状态（Governor/Breaker 各一）、流式结果回填、缺省归一、opts 覆盖、
+Checker 透传。
+Fixes #198
+
 ## [v0.23.0] — 2026-11-14
 
 ### 修复(llm)：ProbeBudget 能力面——探测时限推导看得见注入方在途上限
