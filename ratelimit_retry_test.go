@@ -272,12 +272,14 @@ func TestBackoffDelayJitteredCurve(t *testing.T) {
 				tc.name, tc.attempt, tc.base, tc.ceil, tc.isRateLimit, got, tc.want)
 		}
 	}
-	// 包级 backoffDelay（0.5 单边向上抖动）＝同源曲线 + [d, 1.5d) 抖动 + ceil 封顶：
-	// 低档位结果落在区间内，高档位（≥ceil）恒等于 ceil。
+	// 包级 backoffDelay（0.5 单边向上抖动）＝同源曲线 + [d, 1.5d) 抖动：
+	// 低档位结果落在区间内；封顶档（llm#189 起）为软上限 [ceil, ceil×1.5)——
+	// 此前「高档位恒等于 ceil」是被钳制副作用钉死的同值行为，恰是 429 群撞
+	// 复活的根源，不再成立。
 	if got := backoffDelay(3, 2*time.Second, 32*time.Second, true); got < 8*time.Second || got >= 12*time.Second {
 		t.Fatalf("backoffDelay 第3拍应落在 [8s,12s): %v", got)
 	}
-	if got := backoffDelay(5, 2*time.Second, 32*time.Second, true); got != 32*time.Second {
-		t.Fatalf("backoffDelay 封顶应恒为 ceil: %v", got)
+	if got := backoffDelay(5, 2*time.Second, 32*time.Second, true); got < 32*time.Second || got >= 48*time.Second {
+		t.Fatalf("封顶档应落在软上限 [32s,48s): %v", got)
 	}
 }

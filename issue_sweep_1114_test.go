@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- #187 fit 裁剪与记账同字段面（Content + ToolCalls + 多模态文本部件） ---
@@ -127,5 +128,23 @@ func TestFitInputUnconvergedIsDiagnosable_Issue188(t *testing.T) {
 	}
 	if msgList[0].Content != sys {
 		t.Fatal("system 提示词不得被裁")
+	}
+}
+
+// --- #189 退避封顶档软上限 ---
+
+// TestBackoffCappedTierStaysSpread_Issue189 封顶档并发打散：此前「先抖动后钳制」
+// 把 ≥ceil 档位的等待削成同一毫秒（429 群撞复活）；软上限下必须保持散布。
+func TestBackoffCappedTierStaysSpread_Issue189(t *testing.T) {
+	seen := map[time.Duration]bool{}
+	for range 64 {
+		d := backoffDelay(6, 2*time.Second, 32*time.Second, true)
+		if d < 32*time.Second || d >= 48*time.Second {
+			t.Fatalf("封顶档应落在 [32s,48s): %v", d)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 8 {
+		t.Fatalf("封顶档应保持打散，64 个样本只出现 %d 个不同值", len(seen))
 	}
 }

@@ -72,7 +72,10 @@ type Client struct {
 
 	MaxRetries int           // 最大尝试次数（含首次），默认 3
 	BaseDelay  time.Duration // 指数退避基准，默认 2s
-	MaxDelay   time.Duration // 退避上限，默认 30s
+	// MaxDelay 退避上限，默认 30s。封顶档是**软上限**（llm#189）：计算退避
+	// ≥MaxDelay 的档位在 [MaxDelay, MaxDelay×(1+抖动比例)) 内打散，不硬钳——
+	// 硬钳会把封顶档所有并发调用的等待压成同一毫秒，429 群撞在该档位复活。
+	MaxDelay time.Duration
 
 	// AttemptTimeout 单次尝试独立限时（0=不限，默认；llm#84）。单客户端路径
 	// 对齐 Resilient 链的 per-provider AttemptTimeout：挂死的 provider 连接
@@ -410,6 +413,7 @@ var retryJitter = mathx.NewUnstable(0.5)
 // backoffDelay 指数退避 + jitter（Client 与 Resilient 共用）；429 下限 5s，
 // 下限本身仍封顶 ceil——ceil<5s 的测试场景下最终钳到 ceil 的结果不变。
 // isRateLimit 由调用方携带 ClassifyLLMError 结果，免二次全串分类。
+// 封顶档软上限见 backoffDelayJittered（llm#189）。
 func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.Duration {
 	return backoffDelayJittered(attempt, base, ceil, isRateLimit, retryJitter)
 }
@@ -417,6 +421,12 @@ func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.
 // backoffDelayJittered 退避曲线唯一实现（llm#100 起抖动器可配）：与
 // backoffDelay 同曲线同语义，抖动器由调用方注入——模型级 RateLimitRetry
 // 装饰器用自己档位的抖动比例，Client/Resilient 继续用包级 retryJitter。
+//
+// 封顶档是**软上限**（llm#189）：计算退避 ≥ceil 的档位不再硬钳到 ceil，而在
+// [ceil, ceil×(1+ratio)) 内抖动。此前「先抖动后钳制」会把封顶档所有并发调用
+// 的等待削成同一毫秒——429 群撞恰在退避最长、最该打散的档位复活（限流窗口
+// 被反复续期），打散承诺在最需要处归零。未到 ceil 的档位仍硬钳 ceil（低档位
+// 抖动越过 ceil 的部分不放大上限）。
 func backoffDelayJittered(attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) time.Duration {
 	minDelay := base
 	if isRateLimit {
@@ -425,8 +435,12 @@ func backoffDelayJittered(attempt int, base, ceil time.Duration, isRateLimit boo
 	delay := max(base*time.Duration(1<<uint(attempt-1)), minDelay)
 	// jitter 按当次 delay 幅度（base/2 基准在高 attempt 档抖动占比趋近于零，
 	// 打散效果失效——收口轮修）：单边向上 [delay, (1+ratio)·delay)，永不早于计算退避
-	delay = min(jitter.UpwardDuration(delay), ceil)
-	return delay
+	if delay >= ceil {
+		// 封顶档：软上限 [ceil, ceil×(1+ratio))——等待永不早于计算退避（≥ceil），
+		// 并发调用在封顶档仍保持打散（llm#189）
+		return jitter.UpwardDuration(ceil)
+	}
+	return min(jitter.UpwardDuration(delay), ceil)
 }
 
 // GenerateJSON 生成并解析 JSON；解析失败把原始输出与错误回喂重试 1 次。
