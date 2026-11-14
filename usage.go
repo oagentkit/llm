@@ -28,10 +28,15 @@ type UsageRecord struct {
 	CompletionTokens int
 	ReasoningTokens  int
 	TotalTokens      int
-	DurationMS       int64
-	FinishReason     string
-	Iteration        int64             // 本作用域第几次 LLM 调用（1 起；无计数器为 0）
-	Labels           map[string]string // 归因标签（session/case/step/agent 等，调用方自定）
+	// Partial 失败面标记（llm#191）：true = 该记录来自失败路径的 prompt 侧估算
+	// （请求已发出、provider 大概率已受理计费，但失败拿不到 usage——
+	// completion 记 0）。聚合口径：PromptTokens/TotalTokens 照常入账（预算与
+	// 成本对失败面不再系统性偏低），判读 completion 侧指标时应排除 Partial 记录。
+	Partial      bool
+	DurationMS   int64
+	FinishReason string
+	Iteration    int64             // 本作用域第几次 LLM 调用（1 起；无计数器为 0）
+	Labels       map[string]string // 归因标签（session/case/step/agent 等，调用方自定）
 }
 
 // Sink 用量出口。
@@ -158,6 +163,13 @@ func recordFromUsage(ctx context.Context, info *callbacks.RunInfo, usage *model.
 		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
 		TotalTokens:      usage.TotalTokens,
 		Labels:           labelsFrom(ctx),
+	}
+	// provider 只回分项、TotalTokens 缺席（DeepSeek/MiMo 等兼容端点常见）时
+	// 兜底重算 prompt+completion（llm#195）：与 wrap/continue.go
+	// mergeContinueMeta 的「total 重算保持自洽」同一口径——按 TotalTokens
+	// 聚合的 token 看板不再因 total 缺席而恒 0（分项非 0 的静默失真）。
+	if rec.TotalTokens == 0 {
+		rec.TotalTokens = rec.PromptTokens + rec.CompletionTokens
 	}
 	if start, ok := ctx.Value(startKey{}).(time.Time); ok && !start.IsZero() {
 		rec.DurationMS = time.Since(start).Milliseconds()

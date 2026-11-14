@@ -16,19 +16,44 @@ import (
 // 跨过单请求重试边界后只恢复 1 次与用户预期差距过大，10 次是生产调过的上限）。
 const MaxStreamRecoveryRetries = 10
 
-// transientErrorReasons 瞬态失败原因码（统一小写：匹配前 err 文案会 ToLower）。
+// transientErrorReasons 瞬态失败原因码/文案白名单（统一小写：匹配前 err 文案
+// 会 ToLower；子串匹配，错误链上任意一层包装文案都参与）。
+//
+// ⚠ llm#190 起本判定改**显式白名单**：不再借 ClassifyLLMError 的
+// 「未知缺省可重试」（那是单请求 HTTP 重试的宽进口径——未知文案判瞬态曾让
+// turn 级恢复对未知永久错误（内容策略拒绝、function calling 不支持、模型下架
+// 等）全开，重开流 10 次、每轮重烧 token 与延迟）。白名单之外的未知文案不判
+// 瞬态——重开流的代价是整段重烧，不可判定时宁可让错误尽快上抛。
 var transientErrorReasons = map[string]bool{
+	// ZCode 形态的原因码
 	"model_request_timeout": true, "model_rate_limited": true,
 	"model_server_error": true, "model_network_error": true,
 	"stream_idle_timeout": true, "rate_limited": true,
 	"server_error": true, "network_error": true, "timeout": true,
+	// 常见瞬态文案形态（白名单化后未知文案不再缺省瞬态，高频形态显式登记；
+	// 与 ClassifyLLMError 的限流/网络面同族，彼处数字 marker 走词边界、此处
+	// 放宽为子串）："gateway timeout"/"request timeout" 等由 "timeout" 覆盖
+	"rate limit": true, "too many requests": true, "throttl": true,
+	"internal server error": true, "bad gateway": true,
+	"service unavailable": true, "overloaded": true,
+	"connection reset": true, "connection refused": true, "broken pipe": true,
+	"temporarily unavailable": true, "deadline exceeded": true,
 }
 
+// transientStatusMarkers 裸 5xx 数字形态（"HTTP 502"/"503 service unavailable"）：
+// 词边界匹配（errors.go 的 containsMarker 单源——"failed after 1500ms" 不误
+// 命中）。429 由 ClassifyLLMError 的限流面覆盖，不入本表。
+var transientStatusMarkers = []string{"500", "502", "503", "504", "529"}
+
 // IsTransientStreamError 流式 turn 中的错误是否瞬态（值得从安全锚点重开流）。
-// 与 ClassifyLLMError 的分工：后者面向单请求 HTTP 重试；本判定面向 turn 级
-// 恢复——额外覆盖流空闲超时与原因码形态（错误链上任意一层的文案都参与匹配）。
+// 与 ClassifyLLMError 的分工：后者面向单请求 HTTP 重试、对未知文案缺省可重试
+// （宽进）；本判定面向 turn 级恢复——重开流的代价是整段重烧，故取显式白名单
+// （llm#190）：结构化瞬态类型（ctx 超时、429/5xx 状态码）+ 原因码/文案白名单
+// 命中才判瞬态。未知永久错误（无 marker 文案）不再缺省瞬态——此前最多重开
+// 流 10 次、每轮重烧 token 与延迟。
 // 调用方主动取消不算瞬态（与降级矩阵「ctx 取消 → 全链中止」一致）：若判为
 // 瞬态，取消后的恢复循环会空转 MaxStreamRecoveryRetries 轮、每轮立即再失败。
+// ctx 超时算瞬态（挂死流被兜底限时打断，自动恢复语义）。
 func IsTransientStreamError(err error) bool {
 	if err == nil {
 		return false
@@ -36,8 +61,15 @@ func IsTransientStreamError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	if h := ClassifyLLMError(err); h.Retryable {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
+	}
+	// 结构化 HTTP 状态码：429/5xx 瞬态；其余 4xx 确定性失败，不重开流
+	if status := httpStatus(err); status > 0 {
+		return status == 429 || status >= 500
+	}
+	if ClassifyLLMError(err).IsRateLimit {
+		return true // 限流文案/数字 marker（词边界，"failed after 1429ms" 不误判）
 	}
 	msg := strings.ToLower(err.Error())
 	for reason := range transientErrorReasons {
@@ -45,7 +77,7 @@ func IsTransientStreamError(err error) bool {
 			return true
 		}
 	}
-	return false
+	return matchAny(msg, transientStatusMarkers)
 }
 
 // SuspiciousEmptyResult 空终态检测：零文本 + 零工具调用 + 非 stop 终止 +

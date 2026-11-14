@@ -30,6 +30,7 @@ import (
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/oagentkit/llm"
 	"github.com/oagentkit/textx/textutil"
 	"github.com/oekit/concurrency/async"
 )
@@ -217,19 +218,19 @@ func FitMessages(msgs []*schema.Message, limitChars int) ([]*schema.Message, Fit
 	return out, res
 }
 
+// runeTotal/msgRunes 的计量单源 = llm.MsgRuneCount（llm#187）：Content 之外，
+// ToolCalls（工具名+参数 JSON）与三组多模态文本部件同样计入——此前只数
+// Content，tool-heavy 会话的总量系统性低估、「未超限」误判直通。L3 病理兜底
+// 的候选/截断仍只动正文（ToolCalls 参数 JSON 不改写，协议配对完整性优先）。
 func runeTotal(msgs []*schema.Message) int {
-	n := 0
-	for _, m := range msgs {
-		n += utf8.RuneCountInString(m.Content)
-	}
-	return n
+	return llm.MsgsRuneCount(msgs)
 }
 
 // msgRunes 一次扫描得到每条消息的 rune 数（FitMessages 多层共享，免重复分配）。
 func msgRunes(msgs []*schema.Message) []int {
 	sizes := make([]int, len(msgs))
 	for i, m := range msgs {
-		sizes[i] = utf8.RuneCountInString(m.Content)
+		sizes[i] = llm.MsgRuneCount(m)
 	}
 	return sizes
 }
@@ -431,11 +432,13 @@ func (f *FitModel) fit(msgs []*schema.Message) ([]*schema.Message, int) {
 }
 
 // reportBreakdown 上下文构成分解（对标 ZCode context-usage-breakdown）：按 role
-// 分桶累计本次发送量（rune）。FitModel 已在发送路径上，顺手分桶零额外遍历成本。
+// 分桶累计本次发送量（rune）。计量口径 = llm.MsgRuneCount（与 res.After 同源，
+// llm#187 起含 ToolCalls/多模态——分桶总和才与发送总量对得上）。FitModel 已在
+// 发送路径上，顺手分桶零额外遍历成本。
 func (f *FitModel) reportBreakdown(msgs []*schema.Message) {
 	bucket := map[string]int{}
 	for _, m := range msgs {
-		bucket[string(m.Role)] += len([]rune(m.Content))
+		bucket[string(m.Role)] += llm.MsgRuneCount(m)
 	}
 	f.OnBreakdown(f.Stage, bucket)
 }

@@ -156,20 +156,17 @@ func (m *RateLimitRetryModel) WithTools(tools []*schema.ToolInfo) (einomodel.Too
 }
 
 // Generate 429 退避重试：限流失败按指数曲线等待后重放同一次请求；非限流
-// 失败原样上抛；ctx 取消立即让位。
+// 失败原样上抛；ctx 取消立即让位。Retry-After sink 由 retryRateLimitCall
+// 每轮物理调用前注入（llm#192）。
 func (m *RateLimitRetryModel) Generate(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
-	// Retry-After sink（传输层据此回写 429 服务端建议；未装 RetryAfterTransport
-	// 的请求零开销）。ctx 为局部重绑，不改调用方的 ctx。
-	ctx = WithRetryAfterSink(ctx)
-	return retryRateLimitCall(ctx, m, func() (*schema.Message, error) {
+	return retryRateLimitCall(ctx, m, func(ctx context.Context) (*schema.Message, error) {
 		return m.inner.Generate(ctx, input, opts...)
 	})
 }
 
 // Stream 建流前的 429 同样退避重试；流一旦建立即原样交还（不触碰流生命周期）。
 func (m *RateLimitRetryModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
-	ctx = WithRetryAfterSink(ctx)
-	return retryRateLimitCall(ctx, m, func() (*schema.StreamReader[*schema.Message], error) {
+	return retryRateLimitCall(ctx, m, func(ctx context.Context) (*schema.StreamReader[*schema.Message], error) {
 		return m.inner.Stream(ctx, input, opts...)
 	})
 }
@@ -178,18 +175,26 @@ func (m *RateLimitRetryModel) Stream(ctx context.Context, input []*schema.Messag
 // 成功拍直接返回真结果不重放）：attempt 1..attempts 执行 try；失败分类——
 // 非限流/ctx 取消立即上抛；限流失败按同源退避曲线（waitBackoffGap，含
 // Retry-After 取舍）等待后重试。耗尽上抛末个错误（%w 保留 errors.Is 链）。
-func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try func() (T, error)) (T, error) {
+//
+// Retry-After sink 每轮物理调用前注入全新实例（llm#192）：hint 的生命周期 =
+// 单次失败。此前 sink 在环上游注入一次、整环复用——上一轮 429 带的
+// Retry-After（如 300s）在下一轮「不带该头的 429」上仍被采信，本地曲线（4s
+// 级）被陈旧整段窗口盖过，最坏单次 Generate 卡满 Σhint（仅 ctx 可打断）。
+func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try func(ctx context.Context) (T, error)) (T, error) {
 	var lastErr error
+	attemptCtx := ctx
 	for attempt := 1; attempt <= m.cfg.attempts; attempt++ {
 		if attempt > 1 {
 			// 首拍等待 = base（与 Client.generateRetry 的 0 基 attempt 曲线同源：
-			// waitBackoffGap 的 attempt 参数即 backoffDelay 的 1 基拍号）
-			if err := waitBackoffGap(ctx, attempt-1, m.cfg.base, m.cfg.ceil, true, m.jitter); err != nil {
+			// waitBackoffGap 的 attempt 参数即 backoffDelay 的 1 基拍号）。
+			// attemptCtx 是上一轮物理调用的 sink——只采信本次失败产生的建议
+			if err := waitBackoffGap(attemptCtx, attempt-1, m.cfg.base, m.cfg.ceil, true, m.jitter); err != nil {
 				var zero T
 				return zero, err // ctx 取消原样上抛
 			}
 		}
-		out, err := try()
+		attemptCtx = WithRetryAfterSink(ctx)
+		out, err := try(attemptCtx)
 		if err == nil {
 			return out, nil
 		}

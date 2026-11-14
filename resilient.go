@@ -180,6 +180,17 @@ type timeoutProvider interface {
 	AttemptTimeout() time.Duration
 }
 
+// probeBudgetProvider 可选能力：Provider 显式声明单次尝试的**真实在途上限**
+// （llm#197）。注入 HTTPClient 的 provider 的 AttemptTimeout() 恒为 0（超时归
+// 注入方 own，llm#143）——链层的 BreakerProbeTimeout 缺省推导失去真实在途
+// 上限，塌回 90s 缺省：宿主注入长超时（10–15min 长生成）时半开探测的真实
+// 在途可超探测时限，被判失联并放行并发新探测，半开「单探测隔离」失效
+// （v0.10.28 审计修复的洞在注入路径上原样回来）。实现本接口把注入方的 HTTP
+// 超时（或自定的在途预算）声明出来，推导才有据。
+type probeBudgetProvider interface {
+	ProbeBudget() time.Duration
+}
+
 // Resilient 弹性 LLM 客户端。
 //
 // 与 *Client 方法签名一致（满足 Generator），可作 drop-in 替换。
@@ -223,10 +234,18 @@ func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error)
 			return nil, fmt.Errorf("llm: Resilient 链上第 %d 个 Provider 为 nil（含 typed-nil，条件装配请过滤后再入链）", i)
 		}
 	}
-	// 尝试预算 = max(90s, 链上 provider 声明的单次尝试限时)——探测时限推导须
-	// 覆盖最坏在途（长超时配置下半开隔离才不失效）
+	// 尝试预算 = max(90s, 链上 provider 声明的单次尝试限时/真实在途上限)——
+	// 探测时限推导须覆盖最坏在途（长超时配置下半开隔离才不失效）。
+	// ProbeBudget 优先（llm#197）：注入 HTTPClient 的 provider 的
+	// AttemptTimeout() 恒为 0，真实在途上限只能由注入方经 ProbeBudget 声明。
 	budget := 90 * time.Second
 	for _, p := range chain.Providers {
+		if pb, ok := p.(probeBudgetProvider); ok {
+			if d := pb.ProbeBudget(); d > budget {
+				budget = d
+				continue
+			}
+		}
 		if tp, ok := p.(timeoutProvider); ok {
 			if d := tp.AttemptTimeout(); d > budget {
 				budget = d
@@ -243,6 +262,15 @@ func NewResilient(chain *FallbackChain, cfg ResilientConfig) (*Resilient, error)
 			breaker.WithProbeTimeout(cfg.BreakerProbeTimeout)),
 	}, nil
 }
+
+// BreakerProbeTimeout 返回生效的熔断半开探测时限（llm#197 观测面）。未显式
+// 配置时按「单模型最坏在途」推导：(RetriesPerModel+1) × (MaxDelay + 尝试预算)，
+// 尝试预算 = 链上 provider 声明的 ProbeBudget/AttemptTimeout 与 90s 下限的
+// 较大者。注入 HTTPClient 且未声明 ProbeBudget（或声明 0 = 注入方依赖请求级
+// ctx、在途上限未知）时尝试预算塌回 90s 缺省——宿主真实在途可超推导值时
+// **必须显式配置** ResilientConfig.BreakerProbeTimeout，否则半开「单探测隔离」
+// 可能失效（探测被判失联并放行并发新探测）。
+func (r *Resilient) BreakerProbeTimeout() time.Duration { return r.cfg.BreakerProbeTimeout }
 
 // LastModel 返回最近一次成功调用使用的模型名（无成功调用返回空）。
 func (r *Resilient) LastModel() string {
@@ -451,13 +479,17 @@ func (r *Resilient) tryProvider(ctx context.Context, stage string, p Provider, i
 // 按该 Provider 窗口裁剪 → 委托 Client.generateRetry 单模型重试骨架
 // （每次尝试独立受 AttemptTimeout 约束；chainFallback——上层链有备选模型）。
 // prepare 复制消息 + 装配单模型 Client + fitInput（Generate 路径专用——
-// generateRetry 直接消费已裁剪副本）。JSON 路径走 GenerateJSON 自身的 copy+fit，
-// 不经此函数，避免双份裁剪。
-func (r *Resilient) prepare(p Provider, msgs []*schema.Message) (*Client, []*schema.Message) {
+// generateRetry 直接消费已裁剪副本）。fitInput 收敛失败返回可诊断错误
+// （llm#188：错误文案带 context too long marker → 确定性失败 → 切下一环，
+// 不在本环重试白烧）。JSON 路径走 GenerateJSON 自身的 copy+fit，不经此函数，
+// 避免双份裁剪。
+func (r *Resilient) prepare(p Provider, msgs []*schema.Message) (*Client, []*schema.Message, error) {
 	msgsCopy := copyMsgs(msgs)
 	c := r.buildClient(p)
-	c.fitInput(msgsCopy)
-	return c, msgsCopy
+	if err := c.fitInput(msgsCopy); err != nil {
+		return nil, nil, err
+	}
+	return c, msgsCopy, nil
 }
 
 // attemptTimeoutOf 提取 Provider 声明的单次尝试超时（未声明 = 0）。
@@ -469,7 +501,10 @@ func attemptTimeoutOf(p Provider) time.Duration {
 }
 
 func (r *Resilient) tryOneProvider(ctx context.Context, p Provider, stage string, msgs []*schema.Message) (*schema.Message, error) {
-	c, msgsCopy := r.prepare(p, msgs)
+	c, msgsCopy, err := r.prepare(p, msgs)
+	if err != nil {
+		return nil, err
+	}
 
 	// 单次尝试超时：每次尝试独立计时。不能在循环外创建一次——否则 deadline
 	// 覆盖全部重试 + 退避睡眠，首次尝试耗满后重试全部形同虚设。

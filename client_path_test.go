@@ -142,10 +142,10 @@ func TestClientBackoffDelay(t *testing.T) {
 	if d429 < 5*time.Second {
 		t.Fatalf("429 退避下限 5s，实际 %v", d429)
 	}
-	// 上限封顶
+	// 封顶档软上限（llm#189）：≥ceil 档位在 [ceil, ceil×1.5) 内抖动，不硬钳
 	dMax := backoffDelay(10, c.BaseDelay, c.MaxDelay, false)
-	if dMax > 30*time.Second {
-		t.Fatalf("退避应封顶 30s，实际 %v", dMax)
+	if dMax < 30*time.Second || dMax >= 45*time.Second {
+		t.Fatalf("封顶档应落在 [30s,45s)，实际 %v", dMax)
 	}
 }
 
@@ -193,7 +193,9 @@ func TestFitInputTruncatesLongestUser(t *testing.T) {
 		schema.UserMessage(short),
 		schema.UserMessage(long),
 	}
-	c.fitInput(msgList)
+	if err := c.fitInput(msgList); err != nil {
+		t.Fatal(err)
+	}
 	if len([]rune(msgList[2].Content)) >= 200 {
 		t.Fatal("超长 user 消息应被截断")
 	}
@@ -209,7 +211,9 @@ func TestFitInputWithinLimit(t *testing.T) {
 	c := &Client{ContextTokens: 1_000_000, MaxOutputTokens: 50_000}
 	original := "正常长度消息"
 	msgList := []*schema.Message{schema.UserMessage(original)}
-	c.fitInput(msgList)
+	if err := c.fitInput(msgList); err != nil {
+		t.Fatal(err)
+	}
 	if msgList[0].Content != original {
 		t.Fatal("窗口内消息不应被修改")
 	}

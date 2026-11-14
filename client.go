@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -71,7 +72,10 @@ type Client struct {
 
 	MaxRetries int           // 最大尝试次数（含首次），默认 3
 	BaseDelay  time.Duration // 指数退避基准，默认 2s
-	MaxDelay   time.Duration // 退避上限，默认 30s
+	// MaxDelay 退避上限，默认 30s。封顶档是**软上限**（llm#189）：计算退避
+	// ≥MaxDelay 的档位在 [MaxDelay, MaxDelay×(1+抖动比例)) 内打散，不硬钳——
+	// 硬钳会把封顶档所有并发调用的等待压成同一毫秒，429 群撞在该档位复活。
+	MaxDelay time.Duration
 
 	// AttemptTimeout 单次尝试独立限时（0=不限，默认；llm#84）。单客户端路径
 	// 对齐 Resilient 链的 per-provider AttemptTimeout：挂死的 provider 连接
@@ -115,7 +119,8 @@ func estimateTokens(s string) int { return textutil.EstTokensCJK(s) }
 // 预算短路形同虚设）与三组多模态字段的文本部件同样计入。口径对齐
 // textx/compact 的 msgTokens（同 org 两套估算不许分叉：彼处同样正文 +
 // ToolCalls 双计），多模态部件按文本计——图片/音频 URL 的真实 token 由
-// provider usage 回传兜底，本地估算只做保守下界。
+// provider usage 回传兜底，本地估算只做保守下界。字段面与 MsgRuneCount
+// （rune 口径，#187 起裁剪面共用）单源对齐。
 func estimateMsgTokens(msgs []*schema.Message) int {
 	total := 0
 	for _, m := range msgs {
@@ -135,6 +140,42 @@ func estimateMsgTokens(msgs []*schema.Message) int {
 		for _, part := range m.AssistantGenMultiContent {
 			total += estimateTokens(part.Text)
 		}
+	}
+	return total
+}
+
+// MsgRuneCount 单消息的 rune 口径（#187）：正文 Content 之外，ToolCalls（工具
+// 名 + 参数 JSON——大入参工具调用只算正文会系统性低估，窗口治理形同虚设）与
+// 三组多模态字段的文本部件同样计入。字段面与 estimateMsgTokens（token 口径）
+// 单源对齐：记账与裁剪（fitInputFor / wrap.FitMessages 的 runeTotal/msgRunes）
+// 两条出口同一口径——此前「记账算了、裁剪没算」，tool-heavy 会话的窗口治理
+// 失明。多模态非文本部件（图片/音频）的真实 token 由 provider usage 回传兜底，
+// 本计数只做保守下界。
+func MsgRuneCount(m *schema.Message) int {
+	if m == nil {
+		return 0
+	}
+	n := utf8.RuneCountInString(m.Content)
+	for _, tc := range m.ToolCalls {
+		n += utf8.RuneCountInString(tc.Function.Name) + utf8.RuneCountInString(tc.Function.Arguments)
+	}
+	for _, part := range m.MultiContent {
+		n += utf8.RuneCountInString(part.Text)
+	}
+	for _, part := range m.UserInputMultiContent {
+		n += utf8.RuneCountInString(part.Text)
+	}
+	for _, part := range m.AssistantGenMultiContent {
+		n += utf8.RuneCountInString(part.Text)
+	}
+	return n
+}
+
+// MsgsRuneCount 消息序列的 rune 总量（MsgRuneCount 逐条求和）。
+func MsgsRuneCount(msgs []*schema.Message) int {
+	total := 0
+	for _, m := range msgs {
+		total += MsgRuneCount(m)
 	}
 	return total
 }
@@ -169,6 +210,29 @@ func (c *Client) account(stage string, in []*schema.Message, out *schema.Message
 	}
 }
 
+// accountFailed 失败面记账（llm#191）：失败拿不到 provider usage，按估算记
+// prompt 侧、completion 记 0——UsageRecord.Partial 标记区分「失败面估算」与
+// 成功面记账。请求已发出（AttemptTimeout 打断/429/5xx/传输中断——provider
+// 大概率已受理计费）却零记账，曾让预算短路对失败面失效：RetriesPerModel×
+// 多模型链下失败消耗完全不可见，成本看板成功/失败两套账。与成功路径 account
+// 按物理尝试互斥（成功记账真实 usage、失败记估算），不双计。
+func (c *Client) accountFailed(stage string, in []*schema.Message) {
+	p := estimateMsgTokens(in)
+	if c.OnUsage != nil {
+		c.OnUsage(stage, p, 0)
+	}
+	if c.OnUsageDetailed != nil {
+		c.OnUsageDetailed(stage, UsageRecord{
+			Model:        c.ModelName,
+			PromptTokens: p,
+			Partial:      true,
+		})
+	}
+	if c.Budget != nil {
+		c.Budget.Add(p)
+	}
+}
+
 // Generate 带重试的普通生成（指数退避 + jitter）。
 // 确定性失败（鉴权/权限/上下文超限）不重试；429 退避下限提高后值得等
 // （单客户端无备选可切）。stage 同时注入 ctx（obsx.WithStage）——eino
@@ -176,7 +240,9 @@ func (c *Client) account(stage string, in []*schema.Message, out *schema.Message
 func (c *Client) Generate(ctx context.Context, stage string, msgs []*schema.Message) (*schema.Message, error) {
 	ctx = obsx.WithStage(ctx, stage)
 	msgs = copyMsgs(msgs) // fitInput 原地替换元素，不能污染调用方的切片
-	c.fitInput(msgs)
+	if err := c.fitInput(msgs); err != nil {
+		return nil, err
+	}
 	return c.generateFitted(ctx, stage, msgs)
 }
 
@@ -242,8 +308,12 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 	if c.OnUsage != nil || c.OnUsageDetailed != nil {
 		ctx = withClientAccounting(ctx)
 	}
-	// Retry-After sink（批次四十五）：传输层捕获 429 服务端建议，退避取舍时优先采信
-	ctx = WithRetryAfterSink(ctx)
+	// Retry-After sink（批次四十五）：每轮物理调用前注入**全新** sink（#192）——
+	// hint 的生命周期 = 单次失败。传输层只在响应带 Retry-After 时覆盖写入，
+	// 复用同一 sink 会把上一轮的整段限流窗口套到本轮：本轮 429 不带头时，
+	// 本地曲线（4s 级）被陈旧建议（300s 级）盖过，最坏单次 Generate 卡满
+	// 全部尝试的 Σhint。旧 sink 随 attemptCtx 整体换新，无需清除 API。
+	attemptCtx := ctx
 	var lastErr error
 	var lastHint RetryHint
 	// 提升后的输出上限（0 = 未提升）。粘性记在「当前生效参数」上而不是
@@ -258,22 +328,30 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 			if !sameModelRetryDecision(pol.chainFallback, lastHint, lastErr) {
 				break
 			}
-			if err := waitRetryGap(ctx, attempt, pol, lastHint); err != nil {
-				return nil, attempts, err
-			}
-		}
-		if lastHint.IsTruncated {
-			// 提升后仍截断（或无 MaxOutputTokens 可提升）：同参数重试注定再
-			// 截断，白烧一次钱——就此打住，交上层（降级链切换/调用方处置）
-			if boostTokens > 0 || c.MaxOutputTokens <= 0 {
+			// 截断收手判定在退避等待**之前**（llm#194）：「提升后仍截断/无可
+			// 提升」的同参数重试注定再截断，白烧一次钱——就此打住，交上层
+			// （降级链切换/调用方处置）。打住不该白等一个完整退避（2s~30s）：
+			// 收口判断曾排在 waitRetryGap 之后，chainFallback=true 时这段等待
+			// 恰发生在本可立即切换的路径上。
+			if lastHint.IsTruncated && (boostTokens > 0 || c.MaxOutputTokens <= 0) {
 				break
 			}
-			boostTokens = c.MaxOutputTokens * 3 / 2
-			// 提升输出上限的那轮按新上限重算输入预算再裁剪一次（llm#83）：
-			// 输入按 1 倍预留裁剪过，1.5 倍输出上限 + 原输入可能 > 窗口——
-			// 二次尝试以 context too long 收场，还会被 ClassifyLLMError 判成
-			// 确定性失败，在降级链上白烧一次模型切换
-			c.fitInputFor(boostTokens, msgs)
+			// attemptCtx 是上一轮物理调用的 sink——只采信本次失败产生的建议
+			if err := waitRetryGap(attemptCtx, attempt, pol, lastHint); err != nil {
+				return nil, attempts, err
+			}
+			if lastHint.IsTruncated {
+				// 首次截断：提升输出上限（一次）并按新上限重算输入预算再裁剪
+				// （llm#83）——收手条件已在退避等待前短路，走到这里必为
+				// boostTokens==0 且 MaxOutputTokens>0。输入按 1 倍预留裁剪过，
+				// 1.5 倍输出上限 + 原输入可能 > 窗口——二次尝试以 context too
+				// long 收场，还会被 ClassifyLLMError 判成确定性失败，在降级链上
+				// 白烧一次模型切换
+				boostTokens = c.MaxOutputTokens * 3 / 2
+				if err := c.fitInputFor(boostTokens, msgs); err != nil {
+					return nil, attempts, err
+				}
+			}
 		}
 		// boost 粘性（llm#142）：提升后的每一轮（含非截断失败的续命重试轮）
 		// 都按提升值携带，不许静默回落原上限。
@@ -281,8 +359,11 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 		if boostTokens > 0 {
 			opts = append(opts, model.WithMaxTokens(boostTokens))
 		}
+		// 每轮物理调用换新 sink（#192）：本轮 429 的建议只在本轮失败后的等待
+		// 中可见，下一轮不再读到
+		attemptCtx = WithRetryAfterSink(ctx)
 		attempts = attempt + 1
-		out, err := c.oneAttempt(ctx, stage, msgs, pol.attemptTimeout, opts)
+		out, err := c.oneAttempt(attemptCtx, stage, msgs, pol.attemptTimeout, opts)
 		if err == nil {
 			return out, attempts, nil
 		}
@@ -311,11 +392,16 @@ func waitRetryGap(ctx context.Context, attempt int, pol retryPolicy, hint RetryH
 // waitBackoffGap 退避等待唯一实现（Client.generateRetry 与模型级
 // RateLimitRetry 装饰器共用——曲线/Retry-After 取舍两处不再漂移，llm#100）：
 // 本地指数曲线（抖动器可配）+ 服务端建议钳制采信。ctx 取消原样上抛。
+// Retry-After hint 的生命周期 = 单次失败（llm#192）：调用方传入的 ctx 须携带
+// **本次失败那轮**的 sink（generateRetry/retryRateLimitCall 每轮物理调用前
+// 换新）——陈旧建议不得套用到下一次失败上。
 func waitBackoffGap(ctx context.Context, attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) error {
 	delay := backoffDelayJittered(attempt, base, ceil, isRateLimit, jitter)
 	// 服务端建议优先（合理性钳制：≤5min 或短于本地曲线才采信——长限流交降级链）。
 	// 只在本次失败确为限流时采信：sink 不随尝试清除，429 之后的 500 若也读
-	// sink，会对非限流错误白等陈旧的整段限流窗口（第六轮审计）
+	// sink，会对非限流错误白等陈旧的整段限流窗口（第六轮审计）；「不随尝试
+	// 清除」的另一半由调用方收口——每轮物理调用前换新 sink，429 之后的
+	// 「无 Retry-After 头的 429」同样不再采信上一轮的旧建议（llm#192）
 	if isRateLimit {
 		if after := RetryAfterFrom(ctx); after > 0 {
 			delay = SelectRetryDelay(delay, after)
@@ -348,6 +434,11 @@ func (c *Client) oneAttempt(ctx context.Context, stage string, msgs []*schema.Me
 		cancel()
 	}
 	if err != nil {
+		// 失败面记账（llm#191）：请求已发出（AttemptTimeout 打断/429/5xx/传输
+		// 中断——provider 大概率已受理计费），按估算记 prompt 侧。此前失败
+		// 分支直接返回：不 estimate、不 OnUsage、不 Budget.Add——预算与成本
+		// 对失败面系统性偏低，「预算耗尽全链中止」在高错误率场景形同虚设。
+		c.accountFailed(stage, msgs)
 		return nil, err
 	}
 	c.account(stage, msgs, out)
@@ -370,6 +461,7 @@ var retryJitter = mathx.NewUnstable(0.5)
 // backoffDelay 指数退避 + jitter（Client 与 Resilient 共用）；429 下限 5s，
 // 下限本身仍封顶 ceil——ceil<5s 的测试场景下最终钳到 ceil 的结果不变。
 // isRateLimit 由调用方携带 ClassifyLLMError 结果，免二次全串分类。
+// 封顶档软上限见 backoffDelayJittered（llm#189）。
 func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.Duration {
 	return backoffDelayJittered(attempt, base, ceil, isRateLimit, retryJitter)
 }
@@ -377,6 +469,12 @@ func backoffDelay(attempt int, base, ceil time.Duration, isRateLimit bool) time.
 // backoffDelayJittered 退避曲线唯一实现（llm#100 起抖动器可配）：与
 // backoffDelay 同曲线同语义，抖动器由调用方注入——模型级 RateLimitRetry
 // 装饰器用自己档位的抖动比例，Client/Resilient 继续用包级 retryJitter。
+//
+// 封顶档是**软上限**（llm#189）：计算退避 ≥ceil 的档位不再硬钳到 ceil，而在
+// [ceil, ceil×(1+ratio)) 内抖动。此前「先抖动后钳制」会把封顶档所有并发调用
+// 的等待削成同一毫秒——429 群撞恰在退避最长、最该打散的档位复活（限流窗口
+// 被反复续期），打散承诺在最需要处归零。未到 ceil 的档位仍硬钳 ceil（低档位
+// 抖动越过 ceil 的部分不放大上限）。
 func backoffDelayJittered(attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) time.Duration {
 	minDelay := base
 	if isRateLimit {
@@ -385,8 +483,12 @@ func backoffDelayJittered(attempt int, base, ceil time.Duration, isRateLimit boo
 	delay := max(base*time.Duration(1<<uint(attempt-1)), minDelay)
 	// jitter 按当次 delay 幅度（base/2 基准在高 attempt 档抖动占比趋近于零，
 	// 打散效果失效——收口轮修）：单边向上 [delay, (1+ratio)·delay)，永不早于计算退避
-	delay = min(jitter.UpwardDuration(delay), ceil)
-	return delay
+	if delay >= ceil {
+		// 封顶档：软上限 [ceil, ceil×(1+ratio))——等待永不早于计算退避（≥ceil），
+		// 并发调用在封顶档仍保持打散（llm#189）
+		return jitter.UpwardDuration(ceil)
+	}
+	return min(jitter.UpwardDuration(delay), ceil)
 }
 
 // GenerateJSON 生成并解析 JSON；解析失败把原始输出与错误回喂重试 1 次。
@@ -427,7 +529,9 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 				schema.UserMessage(fmt.Sprintf(hint, lastErr)),
 			)
 		}
-		c.fitInput(callMsgs)
+		if err := c.fitInput(callMsgs); err != nil {
+			return fmt.Errorf("llm: %s %w", stage, err)
+		}
 		resp, attempts, err := c.generateRetry(ctx, stage, callMsgs, pol)
 		if err != nil {
 			return fmt.Errorf("llm: %s 调用失败（已重试 %d 次）: %w", stage, attempts-1, err)
@@ -448,42 +552,148 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 	return fmt.Errorf("llm: %s JSON 解析失败（已带错误重试 1 次）: %w", stage, lastErr)
 }
 
-// fitInput 发送前输入自守恒：总输入超 (窗口-输出预留)×2×0.9 时，
-// 截断最长的 user 消息并留痕（兜底层，正常轮不到）。
-func (c *Client) fitInput(msgs []*schema.Message) {
-	c.fitInputFor(c.MaxOutputTokens, msgs)
+// fitNoteMargin 截断注记余量（rune）：keep 在「预算差额」之外再扣一份，截完
+// 的「正文+注记」总长才真正落在预算内——不扣则截完仍略超 limit（wrap/fit.go
+// L2 同款收口，llm#188 第三项）。
+const fitNoteMargin = 32
+
+// fitNoteFloor 候选消息的 rune 数下限：低于此值的消息截断后「正文+注记」不缩
+// 反涨（注记本身就 ~20 rune），参与裁剪即零进展死循环——不选（wrap L3 的
+// 「置换后必须变小」守卫同款，第八轮审计）。
+var fitNoteFloor = utf8.RuneCountInString("\n"+textutil.TruncNote("§", 0, textutil.FitInputNote)) + 4
+
+// fitInput 发送前输入自守恒：总输入超 (窗口-输出预留)×2×0.9 时，截断最长的
+// user 消息并留痕（兜底层，正常轮不到）。返回错误 = 全部可裁对象穷尽后仍超限
+// （llm#188：不再静默放行——错误文案带 context too long marker，被
+// ClassifyLLMError 判成确定性失败：单客户端立即失败不重试，降级链切换更大
+// 窗口的备选模型；把失败从「provider 侧报错」提前到「本地可诊断失败」）。
+func (c *Client) fitInput(msgs []*schema.Message) error {
+	return c.fitInputFor(c.MaxOutputTokens, msgs)
 }
 
 // fitInputFor 指定输出预留额的输入自守恒（fitInput 的参数化形态）。截断提升轮
 // 以 1.5 倍输出上限重算预算再裁剪（llm#83）——预留只认「本轮实际声明的输出
 // 上限」，不认构造时的缺省值。
-func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) {
+//
+// 裁剪策略（llm#187/#188）：
+//   - 计量口径 = MsgRuneCount（Content + ToolCalls + 三组多模态文本部件），
+//     与 estimateMsgTokens 记账同字段面——tool-heavy 会话不再只按正文算总量
+//     （此前 total 远小于真实发送量 → 判「未超限」直通 → provider 侧
+//     context length exceeded，还被分类成确定性失败放弃重试）；
+//   - 先截最长 user（与 wrap L2 同款：keep 扣注记余量，截完即入窗）；
+//   - 裁后复查总量，仍未入窗回环迭代截最长可裁正文（User/Tool/Assistant，
+//     对齐 wrap L3：错误/提醒结果保护不裁、system 提示词不裁）。ToolCalls
+//     参数 JSON 不改写（协议配对完整性优先）——ToolCalls 占大头且无可裁正文
+//     时收敛失败，返回可诊断错误而非静默直通。
+func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) error {
 	if c.ContextTokens <= 0 {
-		return
+		return nil
 	}
 	// 预算公式单源 textutil.FitCharsLimit（第十轮收口：与 wrap.FitModel 双份
 	// 手写漂移无编译期信号；CJK 感见 ×3/2 语义见彼处注释）
 	limit := textutil.FitCharsLimit(c.ContextTokens, outReserve)
 	if limit <= 0 {
-		return
+		return nil
 	}
-	// 只扫一遍求 total/最长 user：免 []rune 物化与 lens 切片
-	total, longest, longestN := 0, -1, 0
+	sizes := make([]int, len(msgs))
+	total := 0
 	for i, m := range msgs {
-		n := utf8.RuneCountInString(m.Content)
-		total += n
-		if m.Role == schema.User && (longest < 0 || n > longestN) {
-			longest, longestN = i, n
+		sizes[i] = MsgRuneCount(m)
+		total += sizes[i]
+	}
+	if total <= limit {
+		return nil
+	}
+	// 已裁对象不再重选（裁过的消息只剩注记头，重复裁剪零进展）
+	skip := make([]bool, len(msgs))
+	// L2：截最长 user（keep 扣注记余量——此前不扣，截完仍略超限照发）
+	if idx := longestIndex(msgs, sizes, skip, schema.User); idx >= 0 {
+		keep := max(limit-(total-sizes[idx])-fitNoteMargin, 0)
+		total -= trimMsgContent(msgs, sizes, idx, keep)
+		if total <= limit {
+			return nil
+		}
+		skip[idx] = true
+	}
+	// L3 回环：仍未入窗 → 迭代截最长可裁（User/Tool/Assistant）正文直至入窗
+	// 或无可裁对象。此前只裁一条、裁完不复查：「其余消息之和本身已 ≥ limit」
+	// 时 user 被削成注记、总量仍远超 limit 却已出函数（llm#188）。
+	for total > limit {
+		big := longestTrimable(msgs, sizes, skip)
+		if big < 0 {
+			break
+		}
+		keep := max(sizes[big]-(total-limit)-fitNoteMargin, 0)
+		total -= trimMsgContent(msgs, sizes, big, keep)
+		if total <= limit {
+			return nil
+		}
+		skip[big] = true // 该消息已裁到注记头，本轮裁剪无进展空间
+	}
+	return fmt.Errorf("llm: 输入自守恒失败：裁剪全部可裁正文后仍超窗口预算（%d > %d rune，context too long）——请缩小输入或换更大窗口的模型",
+		total, limit)
+}
+
+// longestIndex 指定角色中 rune 数最大的消息下标（-1 = 无）；已跳过（skip）的
+// 不参与。
+func longestIndex(msgs []*schema.Message, sizes []int, skip []bool, role schema.RoleType) int {
+	idx := -1
+	for i, m := range msgs {
+		if m == nil || skip[i] || m.Role != role {
+			continue
+		}
+		if idx < 0 || sizes[i] > sizes[idx] {
+			idx = i
 		}
 	}
-	if total <= limit || longest < 0 {
-		return
+	return idx
+}
+
+// longestTrimable L3 候选：User/Tool/Assistant 中 rune 数最大且可裁（高于注记
+// 下限、非保护结果）的消息下标（-1 = 无）。system 提示词不裁——指令被腰斩的
+// 代价不可控，宁可交可诊断错误。
+func longestTrimable(msgs []*schema.Message, sizes []int, skip []bool) int {
+	big := -1
+	for i, m := range msgs {
+		if m == nil || skip[i] || sizes[i] <= fitNoteFloor {
+			continue
+		}
+		switch m.Role {
+		case schema.User, schema.Tool, schema.Assistant:
+		default:
+			continue
+		}
+		if isProtectedResult(m.Content) {
+			continue // 错误/提醒结果保护（wrap L3 同款）：模型自纠依据不裁
+		}
+		if big < 0 || sizes[i] > sizes[big] {
+			big = i
+		}
 	}
-	keep := limit - (total - longestN)
-	if keep < 0 {
-		keep = 0
+	return big
+}
+
+// trimMsgContent 就地截断 msgs[idx] 的 Content 为 keep rune + 留痕注记，返回
+// 消息总 rune 的实际降幅（0 = 无进展——keep 不短于原正文或注记反涨；不动原
+// 消息，调用方据此把该候选置 skip 收口，防死循环）。浅拷贝替换元素指针：
+// fitInput 契约是只改副本、不污染调用方切片。
+func trimMsgContent(msgs []*schema.Message, sizes []int, idx int, keep int) int {
+	m := msgs[idx]
+	cloned := *m
+	cloned.Content = "\n" + textutil.TruncNote(m.Content, keep, textutil.FitInputNote)
+	n := MsgRuneCount(&cloned)
+	delta := sizes[idx] - n
+	if delta <= 0 {
+		return 0
 	}
-	cloned := *msgs[longest]
-	cloned.Content = "\n" + textutil.TruncNote(msgs[longest].Content, keep, textutil.FitInputNote)
-	msgs[longest] = &cloned
+	msgs[idx] = &cloned
+	sizes[idx] = n
+	return delta
+}
+
+// isProtectedResult 错误/提醒结果保护（wrap/fit.go L3 同款语义，根包侧镜像）：
+// 携带提醒信封（含 tool-error 标记）的结果是模型自纠与规则遵循的依据，
+// 窗口裁剪不碰。两处实现须保持一致（wrap 不被根包导入，无法单源）。
+func isProtectedResult(content string) bool {
+	return strings.Contains(content, "<system-reminder>") || strings.Contains(content, "【tool-error】")
 }

@@ -48,10 +48,17 @@ func NewStageRouter(def Generator) *StageRouter {
 }
 
 // Use 注册阶段路由。stage 为精确名（"qa"）或前缀（"R1" 命中 "R1a"）；
-// 重名注册覆盖旧路由。
+// 重名注册覆盖旧路由。stage 为空串 panic（llm#193）：空串前缀
+// strings.HasPrefix(x, "") 恒真且长度 0——曾静默成为全局前缀兜底，接管全部
+// 未命中阶段并**压过构造时的 def**（配置驱动装配 sr.Use(cfg.Stage, gen) 在
+// Stage 字段缺省为空串时路由错配零信号），与「构造期配置错误尽早暴露」的
+// nil def panic 纪律相反。要全局兜底语义请配 NewStageRouter 的 def。
 func (r *StageRouter) Use(stage string, gen Generator) {
 	if gen == nil {
 		panic("stage_router: Use 拒绝 nil Generator（与 New 的 nil def 同纪律——运行期才炸的 nil 难排查）")
+	}
+	if stage == "" {
+		panic("stage_router: Use 拒绝空 stage（空串前缀会静默接管全部未命中阶段并压过 def——全局兜底请配 NewStageRouter 的 def）")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
