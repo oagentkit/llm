@@ -10,6 +10,80 @@ import (
 	"testing"
 )
 
+// drainCompleter 每次被调即向预算注入消耗（模拟并发任务共烧同一任务级预算）
+// 后按脚本失败/成功。
+type drainCompleter struct {
+	name  string
+	b     TokenAccountant
+	drain int
+	err   error
+	out   string
+	calls int
+}
+
+func (f *drainCompleter) Complete(ctx context.Context, req Request) (string, error) {
+	f.calls++
+	if f.b != nil && f.drain > 0 {
+		f.b.Add(f.drain)
+	}
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.out, nil
+}
+
+// TestChainBudgetRecheckedPerEntry_Issue186 第一环失败且预算被烧穿后，
+// 第二环不得再发起——Complete 每环节入口复查预算（对齐 Resilient.stepChain）。
+func TestChainBudgetRecheckedPerEntry_Issue186(t *testing.T) {
+	b := NewBudget(100)
+	first := &drainCompleter{name: "a", b: b, drain: 100, err: errors.New("boom")}
+	second := &fakeCompleter{name: "b", out: "不该被调用"}
+	chain := NewChain(
+		WithCompleter("a", first),
+		WithCompleter("b", second),
+		WithBudget(b),
+		WithRetries(0),
+	)
+	_, err := chain.Complete(context.Background(), Request{Prompt: "hi", Stage: "R1"})
+	if !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("预算烧穿后应返回 ErrBudgetExhausted: %v", err)
+	}
+	if second.calls != 0 {
+		t.Fatalf("第一环烧穿预算后第二环不得发起，实际调了 %d 次", second.calls)
+	}
+}
+
+// TestChainBudgetGateBeforeRetry_Issue186 环内重试前复查预算：第一轮物理调用
+// 失败并把预算烧穿后，同环节的下一轮重试不得发起。
+func TestChainBudgetGateBeforeRetry_Issue186(t *testing.T) {
+	b := NewBudget(100)
+	first := &drainCompleter{name: "a", b: b, drain: 100, err: errors.New("boom")}
+	chain := NewChain(WithCompleter("a", first), WithBudget(b), WithRetries(2))
+	_, err := chain.Complete(context.Background(), Request{Prompt: "hi", Stage: "R1"})
+	if !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("重试间隙预算烧穿应短路: %v", err)
+	}
+	if first.calls != 1 {
+		t.Fatalf("预算烧穿后不得再重试，实际物理调用 %d 次", first.calls)
+	}
+}
+
+// TestChainBudgetSufficientReachesAllEntries_Issue186 正向：预算充足时
+// 全链可达（第一环失败切第二环成功）。
+func TestChainBudgetSufficientReachesAllEntries_Issue186(t *testing.T) {
+	b := NewBudget(100000)
+	first := &fakeCompleter{name: "a", err: errors.New("boom")}
+	second := &fakeCompleter{name: "b", out: "ok-from-backup"}
+	chain := NewChain(WithCompleter("a", first), WithCompleter("b", second), WithBudget(b), WithRetries(0))
+	out, err := chain.Complete(context.Background(), Request{Prompt: "hi", Stage: "R1"})
+	if err != nil || out != "ok-from-backup" {
+		t.Fatalf("预算充足时全链应可达: %v %q", err, out)
+	}
+	if first.calls != 1 || second.calls != 1 {
+		t.Fatalf("两环节各应被调用一次: %d/%d", first.calls, second.calls)
+	}
+}
+
 // TestChainFailedAttemptAccounting_Issue191 失败的物理调用按估算记 prompt 侧：
 // 预算照扣、成本记录 completion=0——失败面消耗不再不可见。
 func TestChainFailedAttemptAccounting_Issue191(t *testing.T) {

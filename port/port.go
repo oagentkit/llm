@@ -215,9 +215,22 @@ func WithTokenCounter(f TokenCounter) ChainOption {
 	return func(c *Chain) { c.count = f }
 }
 
+// budgetGate 预算闸（单源文案）：预算耗尽时在调用前拦下——事后扣减等于没有
+// 预算。budget 未绑定时闸常开。
+func (c *Chain) budgetGate() error {
+	if c.budget == nil || c.budget.Remaining() > 0 {
+		return nil
+	}
+	return fmt.Errorf("%w（已用 %d）", ErrBudgetExhausted, c.budget.Used())
+}
+
 // Complete 走降级链完成一次调用。
 //
 // 顺序：**预算前置判定 → 逐环节尝试（每环节内部可重试）→ 失败切下一环节**。
+// 预算在**两处**复查（llm#186，对齐 eino 路径 Resilient.stepChain 的逐 provider
+// 复查）：整次调用入口 + 每环节入口——第一环烧穿预算（本环失败面记账、并发
+// 任务共烧同一任务级预算）后，第二、第三环不再盲发；此前只在入口判一次，
+// 预算短路在窄接口路径退化为「只拦第一次调用」。
 //
 // 成功时：预算累计消耗、成本按价表记账（价表未收录的模型记为「未定价」，不记 0）。
 // 失败时：返回最后一个错误；ctx 取消/超时时**原样上抛**（用户主动中止不该
@@ -226,15 +239,18 @@ func (c *Chain) Complete(ctx context.Context, req Request) (string, error) {
 	if len(c.entries) == 0 {
 		return "", ErrEmptyChain
 	}
-	// 预算判定必须在调用前——事后扣减等于没有预算。
-	if c.budget != nil && c.budget.Remaining() <= 0 {
-		return "", fmt.Errorf("%w（已用 %d）", ErrBudgetExhausted, c.budget.Used())
+	if err := c.budgetGate(); err != nil {
+		return "", err
 	}
 
 	var lastErr error
 	for _, e := range c.entries {
 		// ctx 已取消/超时 → 不再发起调用（拿一个死 context 去请求模型没有意义）。
 		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		// 预算逐环节复查（llm#186）：越早短路越省钱
+		if err := c.budgetGate(); err != nil {
 			return "", err
 		}
 		gen, allowed := c.breakers.Allow(ctx, e.name)
@@ -266,6 +282,10 @@ func (c *Chain) Complete(ctx context.Context, req Request) (string, error) {
 // 此前每次物理重试都报 Failure，连续失败阈值被单个逻辑请求整体烧穿
 // （WithConsecutiveFailures(3) + WithRetries(2) 下一次 Complete 即熔断），
 // 且 WithRetries 文档从未声明「重试会加速熔断」。
+//
+// 每轮物理调用失败都做失败面记账（llm#191，与 eino 路径 Client.accountFailed
+// 同口径）；环内重试前复查预算（llm#186）——重试间隙预算被烧穿（本环失败面
+// 记账、并发任务共烧）则不再发起下一轮物理调用。
 func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint64) (string, error) {
 	var lastErr error
 	for i := range c.attempts {
@@ -291,6 +311,12 @@ func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint
 			return "", err
 		}
 		if i+1 < c.attempts {
+			// 环内重试前复查预算（llm#186）：本环物理失败已发生（报一次真实
+			// Failure 收口这条放行），预算耗尽则不再烧下一轮。
+			if err := c.budgetGate(); err != nil {
+				c.breakers.Failure(ctx, e.name, gen)
+				return "", err
+			}
 			if !sleep(ctx, c.delay(i)) {
 				// 退避等待被 ctx 取消：失败已发生（非调用中取消），按一次
 				// 真实失败记账后原样上抛——与旧实现（循环内先报 Failure 再
