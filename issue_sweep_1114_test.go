@@ -325,3 +325,29 @@ func TestTruncatedGiveUpBeforeBackoff_Issue194(t *testing.T) {
 		t.Fatalf("首次截断 + 提升轮仍截断即收手，应恰 2 次调用，实际 %d（收手晚于退避等待会多烧一轮）", m.Calls)
 	}
 }
+
+// --- #193 StageRouter.Use("") 静默全局兜底 ---
+
+// TestStageRouterUseRejectsEmptyStage_Issue193 Use("") panic（空串前缀恒命中
+// 且长度 0——曾静默接管全部未命中阶段并压过构造期 def）；正常前缀/精确路由
+// 与 def 兜底语义不受影响。
+func TestStageRouterUseRejectsEmptyStage_Issue193(t *testing.T) {
+	gen := NewClient(&llmtest.Model{RepeatLast: true}, "test", nil)
+	sr := NewStageRouter(gen)
+	assertPanic(t, func() { sr.Use("", gen) })
+	// 正常注册与兜底不受影响
+	sr.Use("R1", gen)
+	if sr.pick("R1a") != gen || sr.pick("qa") != gen || sr.pick("other") != gen {
+		t.Fatal("前缀/精确/兜底路由应不受影响")
+	}
+}
+
+func assertPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("应 panic（构造期配置错误尽早暴露）")
+		}
+	}()
+	fn()
+}
