@@ -308,8 +308,12 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 	if c.OnUsage != nil || c.OnUsageDetailed != nil {
 		ctx = withClientAccounting(ctx)
 	}
-	// Retry-After sink（批次四十五）：传输层捕获 429 服务端建议，退避取舍时优先采信
-	ctx = WithRetryAfterSink(ctx)
+	// Retry-After sink（批次四十五）：每轮物理调用前注入**全新** sink（#192）——
+	// hint 的生命周期 = 单次失败。传输层只在响应带 Retry-After 时覆盖写入，
+	// 复用同一 sink 会把上一轮的整段限流窗口套到本轮：本轮 429 不带头时，
+	// 本地曲线（4s 级）被陈旧建议（300s 级）盖过，最坏单次 Generate 卡满
+	// 全部尝试的 Σhint。旧 sink 随 attemptCtx 整体换新，无需清除 API。
+	attemptCtx := ctx
 	var lastErr error
 	var lastHint RetryHint
 	// 提升后的输出上限（0 = 未提升）。粘性记在「当前生效参数」上而不是
@@ -324,22 +328,30 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 			if !sameModelRetryDecision(pol.chainFallback, lastHint, lastErr) {
 				break
 			}
-			if err := waitRetryGap(ctx, attempt, pol, lastHint); err != nil {
-				return nil, attempts, err
-			}
-		}
-		if lastHint.IsTruncated {
-			// 提升后仍截断（或无 MaxOutputTokens 可提升）：同参数重试注定再
-			// 截断，白烧一次钱——就此打住，交上层（降级链切换/调用方处置）
-			if boostTokens > 0 || c.MaxOutputTokens <= 0 {
+			// 截断收手判定在退避等待**之前**（llm#194）：「提升后仍截断/无可
+			// 提升」的同参数重试注定再截断，白烧一次钱——就此打住，交上层
+			// （降级链切换/调用方处置）。打住不该白等一个完整退避（2s~30s）：
+			// 收口判断曾排在 waitRetryGap 之后，chainFallback=true 时这段等待
+			// 恰发生在本可立即切换的路径上。
+			if lastHint.IsTruncated && (boostTokens > 0 || c.MaxOutputTokens <= 0) {
 				break
 			}
-			boostTokens = c.MaxOutputTokens * 3 / 2
-			// 提升输出上限的那轮按新上限重算输入预算再裁剪一次（llm#83）：
-			// 输入按 1 倍预留裁剪过，1.5 倍输出上限 + 原输入可能 > 窗口——
-			// 二次尝试以 context too long 收场，还会被 ClassifyLLMError 判成
-			// 确定性失败，在降级链上白烧一次模型切换
-			c.fitInputFor(boostTokens, msgs)
+			// attemptCtx 是上一轮物理调用的 sink——只采信本次失败产生的建议
+			if err := waitRetryGap(attemptCtx, attempt, pol, lastHint); err != nil {
+				return nil, attempts, err
+			}
+			if lastHint.IsTruncated {
+				// 首次截断：提升输出上限（一次）并按新上限重算输入预算再裁剪
+				// （llm#83）——收手条件已在退避等待前短路，走到这里必为
+				// boostTokens==0 且 MaxOutputTokens>0。输入按 1 倍预留裁剪过，
+				// 1.5 倍输出上限 + 原输入可能 > 窗口——二次尝试以 context too
+				// long 收场，还会被 ClassifyLLMError 判成确定性失败，在降级链上
+				// 白烧一次模型切换
+				boostTokens = c.MaxOutputTokens * 3 / 2
+				if err := c.fitInputFor(boostTokens, msgs); err != nil {
+					return nil, attempts, err
+				}
+			}
 		}
 		// boost 粘性（llm#142）：提升后的每一轮（含非截断失败的续命重试轮）
 		// 都按提升值携带，不许静默回落原上限。
@@ -347,8 +359,11 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 		if boostTokens > 0 {
 			opts = append(opts, model.WithMaxTokens(boostTokens))
 		}
+		// 每轮物理调用换新 sink（#192）：本轮 429 的建议只在本轮失败后的等待
+		// 中可见，下一轮不再读到
+		attemptCtx = WithRetryAfterSink(ctx)
 		attempts = attempt + 1
-		out, err := c.oneAttempt(ctx, stage, msgs, pol.attemptTimeout, opts)
+		out, err := c.oneAttempt(attemptCtx, stage, msgs, pol.attemptTimeout, opts)
 		if err == nil {
 			return out, attempts, nil
 		}
@@ -377,11 +392,16 @@ func waitRetryGap(ctx context.Context, attempt int, pol retryPolicy, hint RetryH
 // waitBackoffGap 退避等待唯一实现（Client.generateRetry 与模型级
 // RateLimitRetry 装饰器共用——曲线/Retry-After 取舍两处不再漂移，llm#100）：
 // 本地指数曲线（抖动器可配）+ 服务端建议钳制采信。ctx 取消原样上抛。
+// Retry-After hint 的生命周期 = 单次失败（llm#192）：调用方传入的 ctx 须携带
+// **本次失败那轮**的 sink（generateRetry/retryRateLimitCall 每轮物理调用前
+// 换新）——陈旧建议不得套用到下一次失败上。
 func waitBackoffGap(ctx context.Context, attempt int, base, ceil time.Duration, isRateLimit bool, jitter mathx.Unstable) error {
 	delay := backoffDelayJittered(attempt, base, ceil, isRateLimit, jitter)
 	// 服务端建议优先（合理性钳制：≤5min 或短于本地曲线才采信——长限流交降级链）。
 	// 只在本次失败确为限流时采信：sink 不随尝试清除，429 之后的 500 若也读
-	// sink，会对非限流错误白等陈旧的整段限流窗口（第六轮审计）
+	// sink，会对非限流错误白等陈旧的整段限流窗口（第六轮审计）；「不随尝试
+	// 清除」的另一半由调用方收口——每轮物理调用前换新 sink，429 之后的
+	// 「无 Retry-After 头的 429」同样不再采信上一轮的旧建议（llm#192）
 	if isRateLimit {
 		if after := RetryAfterFrom(ctx); after > 0 {
 			delay = SelectRetryDelay(delay, after)

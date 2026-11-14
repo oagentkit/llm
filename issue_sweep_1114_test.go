@@ -11,7 +11,11 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/meguminnnnnnnnn/go-openai"
 	"github.com/oagentkit/llm/llmtest"
+	"github.com/oekit/pkg/httpjson"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -233,5 +237,91 @@ func TestClientFailurePathAccounting_Issue191(t *testing.T) {
 	est := estimateMsgTokens(msgs("hi"))
 	if got := budget.Used(); got != est+150 {
 		t.Fatalf("预算应 = 失败面估算 %d + 成功真实 150，实际 %d", est, got)
+	}
+}
+
+// --- #192 Retry-After sink 生命周期 = 单次失败 ---
+
+// captureTransport 记录每轮物理请求的 ctx（#192：断言每轮拿到的是全新 sink）。
+type captureTransport struct {
+	mu   sync.Mutex
+	ctxs []context.Context
+}
+
+func (t *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.ctxs = append(t.ctxs, req.Context())
+	n := len(t.ctxs)
+	t.mu.Unlock()
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"rate limited"}}`)),
+		Request:    req,
+	}
+	if n == 1 {
+		resp.Header.Set("Retry-After", "1") // 仅首轮带服务端建议
+	}
+	return resp, nil
+}
+
+// TestRetryAfterSinkLifecycle_Issue192 sink 每轮物理调用换新：首轮 429 的
+// Retry-After 只影响首轮失败后的等待；次轮 429 不带头时本地曲线接管，
+// 陈旧建议不得复用（旧实现次轮仍读到首轮旧窗口，最坏白等 Σhint）。
+func TestRetryAfterSinkLifecycle_Issue192(t *testing.T) {
+	capT := &captureTransport{}
+	provider, err := NewOpenAIProvider(context.Background(), OpenAIProviderConfig{
+		BaseURL: "http://llm-issue192.invalid", APIKey: "k", Model: "m",
+		CaptureRetryAfter: true, HTTPClient: &http.Client{Transport: capT},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Model: provider.Model(), ModelName: "m", MaxRetries: 2,
+		BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond}
+	_, err = c.Generate(context.Background(), "R1", msgs("hi"))
+	if err == nil {
+		t.Fatal("两次 429 应失败返回")
+	}
+	if len(capT.ctxs) != 2 {
+		t.Fatalf("应两次物理尝试，实际 %d", len(capT.ctxs))
+	}
+	if got := RetryAfterFrom(capT.ctxs[0]); got != time.Second {
+		t.Fatalf("首轮 sink 应捕获服务端建议 1s: %v", got)
+	}
+	if got := RetryAfterFrom(capT.ctxs[1]); got != 0 {
+		t.Fatalf("次轮应为全新 sink（hint 生命周期 = 单次失败）: %v", got)
+	}
+}
+
+// TestSelectRetryDelayClampSanity 取舍钳制面回归（陈旧/超钳制建议不采信）。
+func TestSelectRetryDelayClampSanity(t *testing.T) {
+	if got := SelectRetryDelay(4*time.Second, 300*time.Second); got != 300*time.Second {
+		t.Fatalf("≤5min 的建议应被采信: %v", got)
+	}
+	if got := SelectRetryDelay(4*time.Second, httpjson.MaxServerRetryAfter+time.Second); got != 4*time.Second {
+		t.Fatalf("超钳制建议应回落本地曲线: %v", got)
+	}
+}
+
+// --- #194 截断收手在退避等待之前 ---
+
+// TestTruncatedGiveUpBeforeBackoff_Issue194 提升后仍截断：下一轮收手 break
+// 必须排在退避等待之前——旧实现白等一个完整退避才放弃（可观测为第 3 次调用）。
+func TestTruncatedGiveUpBeforeBackoff_Issue194(t *testing.T) {
+	m := &llmtest.Model{RepeatLast: true, Script: []llmtest.Resp{
+		{Content: "半截", FinishReason: "length"},
+	}}
+	c := NewClient(m, "test", nil)
+	c.BaseDelay = time.Second // 若收手判断排在等待之后，第 3 轮前会白等 1s
+	c.MaxDelay = time.Second
+	c.MaxOutputTokens = 100
+
+	_, err := c.Generate(context.Background(), "R1", msgs("hi"))
+	if err == nil {
+		t.Fatal("提升后仍截断应失败返回")
+	}
+	if m.Calls != 2 {
+		t.Fatalf("首次截断 + 提升轮仍截断即收手，应恰 2 次调用，实际 %d（收手晚于退避等待会多烧一轮）", m.Calls)
 	}
 }
