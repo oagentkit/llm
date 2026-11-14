@@ -279,16 +279,25 @@ func TestResilientCostTrackerFollowsModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// llm#191 起失败面也记账：主模型的失败尝试记 prompt 侧估算（completion 0），
+	// 备选模型记真实 usage——成本跟随实际执行的模型，失败/成功两套账合一。
 	summary := tracker.Summary()
-	if len(summary) != 1 {
-		t.Fatalf("只有备选模型产生 token，应只有 1 条汇总，得到 %d", len(summary))
+	if len(summary) != 2 {
+		t.Fatalf("失败面记账后应有两个模型的汇总，得到 %d: %v", len(summary), summary)
 	}
 	s, ok := summary["fallback-model"]
 	if !ok {
 		t.Fatalf("成本应记到 fallback-model: %v", summary)
 	}
-	if s.TotalPromptTokens != 100 {
-		t.Fatalf("prompt tokens = %d", s.TotalPromptTokens)
+	if s.TotalPromptTokens != 100 || s.TotalCompletionTokens != 50 {
+		t.Fatalf("fallback 应记真实 usage (100,50): %+v", s)
+	}
+	ps, ok := summary["primary-model"]
+	if !ok {
+		t.Fatalf("失败面记账应落到 primary-model: %v", summary)
+	}
+	if ps.TotalPromptTokens <= 0 || ps.TotalCompletionTokens != 0 {
+		t.Fatalf("primary 失败尝试应记 prompt 侧估算、completion 0: %+v", ps)
 	}
 }
 

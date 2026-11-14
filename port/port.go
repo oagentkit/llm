@@ -275,6 +275,10 @@ func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint
 			c.account(e.name, req, out)
 			return out, nil
 		}
+		// 失败面记账（llm#191）：请求已发出（超时/中断/429/5xx——provider
+		// 大概率已受理计费），按估算记 prompt 侧、completion 记 0。此前只在
+		// 成功时记账，预算与成本对失败面系统性偏低。
+		c.accountFailed(e.name, req)
 		lastErr = err
 		if ctx.Err() != nil {
 			// 用户主动中止：放弃这次放行，不计失败统计（否则连续取消会误熔断）。
@@ -309,6 +313,23 @@ func (c *Chain) account(name string, req Request, resp string) {
 	}
 	if c.tracker != nil {
 		c.tracker.RecordAuto(name, req.Stage, u.PromptTokens, u.CompletionTokens)
+	}
+}
+
+// accountFailed 失败面记账（llm#191）：失败拿不到宿主 usage，按估算记 prompt
+// 侧、completion 记 0——CostRecord 的 completion=0 即「部分记录」标记（只有
+// 成功路径才有 completion）。估算口径与 usage() 同源；宿主注入 TokenCounter
+// 时以其 req 侧计量为准。与成功路径 account 按物理调用互斥，不双计。
+func (c *Chain) accountFailed(name string, req Request) {
+	if c.budget == nil && c.tracker == nil {
+		return
+	}
+	prompt := c.usage(req, "").PromptTokens
+	if c.budget != nil {
+		c.budget.Add(prompt)
+	}
+	if c.tracker != nil {
+		c.tracker.RecordAuto(name, req.Stage, prompt, 0)
 	}
 }
 

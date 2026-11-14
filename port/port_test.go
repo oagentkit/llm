@@ -64,14 +64,18 @@ func TestChainFallsBackToNextCompleter(t *testing.T) {
 		t.Fatalf("两个环节各应被调用一次: primary=%d backup=%d", first.calls, second.calls)
 	}
 	// 成本记在实际执行的模型上（backup），而不是失败的那个。
+	// llm#191 起失败面也记账：primary 的失败尝试记 prompt 侧估算（completion 0）。
 	recs := tracker.Records()
-	if len(recs) != 1 {
-		t.Fatalf("应有 1 条成本记录，实际 %d", len(recs))
+	if len(recs) != 2 {
+		t.Fatalf("失败面记账后应有 2 条成本记录，实际 %d: %+v", len(recs), recs)
 	}
-	if recs[0].Model != backup {
-		t.Fatalf("成本应记在实际执行的模型 %q 上，实际 %q", backup, recs[0].Model)
+	if recs[0].Model != primary || recs[0].CompletionTokens != 0 || recs[0].PromptTokens <= 0 {
+		t.Fatalf("primary 失败尝试应记 prompt 侧估算、completion 0: %+v", recs[0])
 	}
-	if recs[0].PriceStatus != PricePriced {
+	if recs[1].Model != backup {
+		t.Fatalf("成本应记在实际执行的模型 %q 上，实际 %q", backup, recs[1].Model)
+	}
+	if recs[1].PriceStatus != PricePriced {
 		t.Fatalf("backup 若在价表里则应已计价，实际 %v", recs[0].PriceStatus)
 	}
 }

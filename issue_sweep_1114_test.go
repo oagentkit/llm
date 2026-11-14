@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/cloudwego/eino/schema"
 	"github.com/meguminnnnnnnnn/go-openai"
+	"github.com/oagentkit/llm/llmtest"
 	"strings"
 	"testing"
 	"time"
@@ -194,5 +195,43 @@ func TestIsTransientStreamErrorStructured_Issue190(t *testing.T) {
 		if IsTransientStreamError(e) {
 			t.Errorf("不应判瞬态: %v", e)
 		}
+	}
+}
+
+// --- #191 失败面记账 ---
+
+// TestClientFailurePathAccounting_Issue191 失败的物理尝试按估算记 prompt 侧：
+// Budget/OnUsage/OnUsageDetailed 三出口同账，UsageRecord.Partial 留痕；
+// 成功路径记账真实 usage，两路互斥不双计。
+func TestClientFailurePathAccounting_Issue191(t *testing.T) {
+	m := &llmtest.Model{RepeatLast: true, Script: []llmtest.Resp{
+		{Err: errors.New("500 internal error")},
+		{Content: "ok", Prompt: 100, Completion: 50},
+	}}
+	budget := NewBudget(10000)
+	var calls int
+	var partials []bool
+	c := NewClient(m, "test", budget)
+	c.OnUsage = func(stage string, p, comp int) {
+		calls++
+		if calls == 1 && comp != 0 {
+			t.Fatalf("失败面记账 completion 应为 0: %d", comp)
+		}
+	}
+	c.OnUsageDetailed = func(stage string, rec UsageRecord) {
+		partials = append(partials, rec.Partial)
+	}
+	if _, err := c.Generate(context.Background(), "R1", msgs("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("两次物理尝试都应记账，实际 %d", calls)
+	}
+	if len(partials) != 2 || !partials[0] || partials[1] {
+		t.Fatalf("首笔应 Partial=true（失败面估算）、次笔 false（成功真实）: %v", partials)
+	}
+	est := estimateMsgTokens(msgs("hi"))
+	if got := budget.Used(); got != est+150 {
+		t.Fatalf("预算应 = 失败面估算 %d + 成功真实 150，实际 %d", est, got)
 	}
 }

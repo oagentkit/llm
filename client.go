@@ -210,6 +210,29 @@ func (c *Client) account(stage string, in []*schema.Message, out *schema.Message
 	}
 }
 
+// accountFailed 失败面记账（llm#191）：失败拿不到 provider usage，按估算记
+// prompt 侧、completion 记 0——UsageRecord.Partial 标记区分「失败面估算」与
+// 成功面记账。请求已发出（AttemptTimeout 打断/429/5xx/传输中断——provider
+// 大概率已受理计费）却零记账，曾让预算短路对失败面失效：RetriesPerModel×
+// 多模型链下失败消耗完全不可见，成本看板成功/失败两套账。与成功路径 account
+// 按物理尝试互斥（成功记账真实 usage、失败记估算），不双计。
+func (c *Client) accountFailed(stage string, in []*schema.Message) {
+	p := estimateMsgTokens(in)
+	if c.OnUsage != nil {
+		c.OnUsage(stage, p, 0)
+	}
+	if c.OnUsageDetailed != nil {
+		c.OnUsageDetailed(stage, UsageRecord{
+			Model:        c.ModelName,
+			PromptTokens: p,
+			Partial:      true,
+		})
+	}
+	if c.Budget != nil {
+		c.Budget.Add(p)
+	}
+}
+
 // Generate 带重试的普通生成（指数退避 + jitter）。
 // 确定性失败（鉴权/权限/上下文超限）不重试；429 退避下限提高后值得等
 // （单客户端无备选可切）。stage 同时注入 ctx（obsx.WithStage）——eino
@@ -391,6 +414,11 @@ func (c *Client) oneAttempt(ctx context.Context, stage string, msgs []*schema.Me
 		cancel()
 	}
 	if err != nil {
+		// 失败面记账（llm#191）：请求已发出（AttemptTimeout 打断/429/5xx/传输
+		// 中断——provider 大概率已受理计费），按估算记 prompt 侧。此前失败
+		// 分支直接返回：不 estimate、不 OnUsage、不 Budget.Add——预算与成本
+		// 对失败面系统性偏低，「预算耗尽全链中止」在高错误率场景形同虚设。
+		c.accountFailed(stage, msgs)
 		return nil, err
 	}
 	c.account(stage, msgs, out)

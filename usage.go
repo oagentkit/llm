@@ -28,10 +28,15 @@ type UsageRecord struct {
 	CompletionTokens int
 	ReasoningTokens  int
 	TotalTokens      int
-	DurationMS       int64
-	FinishReason     string
-	Iteration        int64             // 本作用域第几次 LLM 调用（1 起；无计数器为 0）
-	Labels           map[string]string // 归因标签（session/case/step/agent 等，调用方自定）
+	// Partial 失败面标记（llm#191）：true = 该记录来自失败路径的 prompt 侧估算
+	// （请求已发出、provider 大概率已受理计费，但失败拿不到 usage——
+	// completion 记 0）。聚合口径：PromptTokens/TotalTokens 照常入账（预算与
+	// 成本对失败面不再系统性偏低），判读 completion 侧指标时应排除 Partial 记录。
+	Partial      bool
+	DurationMS   int64
+	FinishReason string
+	Iteration    int64             // 本作用域第几次 LLM 调用（1 起；无计数器为 0）
+	Labels       map[string]string // 归因标签（session/case/step/agent 等，调用方自定）
 }
 
 // Sink 用量出口。
