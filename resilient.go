@@ -486,10 +486,11 @@ func (r *Resilient) tryProvider(ctx context.Context, stage string, p Provider, i
 func (r *Resilient) prepare(p Provider, msgs []*schema.Message) (*Client, []*schema.Message, error) {
 	msgsCopy := copyMsgs(msgs)
 	c := r.buildClient(p)
-	if err := c.fitInput(msgsCopy); err != nil {
+	fitted, err := c.fitInput(msgsCopy)
+	if err != nil {
 		return nil, nil, err
 	}
-	return c, msgsCopy, nil
+	return c, fitted, nil
 }
 
 // attemptTimeoutOf 提取 Provider 声明的单次尝试超时（未声明 = 0）。

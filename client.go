@@ -15,13 +15,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/oagentkit/llm/internal/fitkit"
 	"github.com/oagentkit/llm/obsx"
 	"github.com/oagentkit/textx/textutil"
 	"github.com/oekit/pkg/jsonrepair"
@@ -239,10 +239,12 @@ func (c *Client) accountFailed(stage string, in []*schema.Message) {
 // callbacks handler 可读到业务阶段。
 func (c *Client) Generate(ctx context.Context, stage string, msgs []*schema.Message) (*schema.Message, error) {
 	ctx = obsx.WithStage(ctx, stage)
-	msgs = copyMsgs(msgs) // fitInput 原地替换元素，不能污染调用方的切片
-	if err := c.fitInput(msgs); err != nil {
-		return nil, err
+	msgs = copyMsgs(msgs) // fitInput 只改副本，不污染调用方的切片
+	fitted, ferr := c.fitInput(msgs)
+	if ferr != nil {
+		return nil, ferr
 	}
+	msgs = fitted
 	return c.generateFitted(ctx, stage, msgs)
 }
 
@@ -348,9 +350,11 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 				// long 收场，还会被 ClassifyLLMError 判成确定性失败，在降级链上
 				// 白烧一次模型切换
 				boostTokens = c.MaxOutputTokens * 3 / 2
-				if err := c.fitInputFor(boostTokens, msgs); err != nil {
-					return nil, attempts, err
+				fitted, ferr := c.fitInputFor(boostTokens, msgs)
+				if ferr != nil {
+					return nil, attempts, ferr
 				}
+				msgs = fitted // L4 组丢弃可能收短消息列（#202），后续轮沿用裁剪后的列
 			}
 		}
 		// boost 粘性（llm#142）：提升后的每一轮（含非截断失败的续命重试轮）
@@ -529,9 +533,11 @@ func (c *Client) generateJSONFitted(ctx context.Context, stage string, msgs []*s
 				schema.UserMessage(fmt.Sprintf(hint, lastErr)),
 			)
 		}
-		if err := c.fitInput(callMsgs); err != nil {
-			return fmt.Errorf("llm: %s %w", stage, err)
+		fitted, ferr := c.fitInput(callMsgs)
+		if ferr != nil {
+			return fmt.Errorf("llm: %s %w", stage, ferr)
 		}
+		callMsgs = fitted
 		resp, attempts, err := c.generateRetry(ctx, stage, callMsgs, pol)
 		if err != nil {
 			return fmt.Errorf("llm: %s 调用失败（已重试 %d 次）: %w", stage, attempts-1, err)
@@ -567,7 +573,7 @@ var fitNoteFloor = utf8.RuneCountInString("\n"+textutil.TruncNote("§", 0, textu
 // （llm#188：不再静默放行——错误文案带 context too long marker，被
 // ClassifyLLMError 判成确定性失败：单客户端立即失败不重试，降级链切换更大
 // 窗口的备选模型；把失败从「provider 侧报错」提前到「本地可诊断失败」）。
-func (c *Client) fitInput(msgs []*schema.Message) error {
+func (c *Client) fitInput(msgs []*schema.Message) ([]*schema.Message, error) {
 	return c.fitInputFor(c.MaxOutputTokens, msgs)
 }
 
@@ -575,25 +581,33 @@ func (c *Client) fitInput(msgs []*schema.Message) error {
 // 以 1.5 倍输出上限重算预算再裁剪（llm#83）——预留只认「本轮实际声明的输出
 // 上限」，不认构造时的缺省值。
 //
-// 裁剪策略（llm#187/#188）：
+// 裁剪策略（llm#187/#188/#202）：
 //   - 计量口径 = MsgRuneCount（Content + ToolCalls + 三组多模态文本部件），
 //     与 estimateMsgTokens 记账同字段面——tool-heavy 会话不再只按正文算总量
 //     （此前 total 远小于真实发送量 → 判「未超限」直通 → provider 侧
 //     context length exceeded，还被分类成确定性失败放弃重试）；
 //   - 先截最长 user（与 wrap L2 同款：keep 扣注记余量，截完即入窗）；
 //   - 裁后复查总量，仍未入窗回环迭代截最长可裁正文（User/Tool/Assistant，
-//     对齐 wrap L3：错误/提醒结果保护不裁、system 提示词不裁）。ToolCalls
-//     参数 JSON 不改写（协议配对完整性优先）——ToolCalls 占大头且无可裁正文
-//     时收敛失败，返回可诊断错误而非静默直通。
-func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) error {
+//     对齐 wrap L3：错误/提醒结果保护不裁、system 提示词不裁）——工具结果的
+//     L1 式「置换为占位注记」由该档承担（keep<=0 即整段置换成注记，与 wrap
+//     microcompact 同效）；ToolCalls 参数 JSON 不改写（协议配对完整性优先）；
+//   - L4 组丢弃兜底（#202）：正文裁尽仍超限的 ToolCalls 主导形态——参数 JSON
+//     不可截断（截断的调用不可重放），整组丢弃最早的非保护工具轮（assistant
+//   - 其配对结果）换一条注记，tool_call/tool_result 配对一致性由组粒度移除
+//     保持，注记留痕可审计。此后仍超限才收敛失败，返回可诊断错误而非静默直通。
+//
+// 返回值是（可能被 L4 收短后的）消息列：L4 组丢弃会改变消息条数，切片头
+// 无法原地传播——调用方必须使用返回值。元素级裁剪仍就地写入（副本契约
+// 不变），只有 L4 需要新列。
+func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) ([]*schema.Message, error) {
 	if c.ContextTokens <= 0 {
-		return nil
+		return msgs, nil
 	}
 	// 预算公式单源 textutil.FitCharsLimit（第十轮收口：与 wrap.FitModel 双份
 	// 手写漂移无编译期信号；CJK 感见 ×3/2 语义见彼处注释）
 	limit := textutil.FitCharsLimit(c.ContextTokens, outReserve)
 	if limit <= 0 {
-		return nil
+		return msgs, nil
 	}
 	sizes := make([]int, len(msgs))
 	total := 0
@@ -602,7 +616,7 @@ func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) error {
 		total += sizes[i]
 	}
 	if total <= limit {
-		return nil
+		return msgs, nil
 	}
 	// 已裁对象不再重选（裁过的消息只剩注记头，重复裁剪零进展）
 	skip := make([]bool, len(msgs))
@@ -611,7 +625,7 @@ func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) error {
 		keep := max(limit-(total-sizes[idx])-fitNoteMargin, 0)
 		total -= trimMsgContent(msgs, sizes, idx, keep)
 		if total <= limit {
-			return nil
+			return msgs, nil
 		}
 		skip[idx] = true
 	}
@@ -626,11 +640,65 @@ func (c *Client) fitInputFor(outReserve int, msgs []*schema.Message) error {
 		keep := max(sizes[big]-(total-limit)-fitNoteMargin, 0)
 		total -= trimMsgContent(msgs, sizes, big, keep)
 		if total <= limit {
-			return nil
+			return msgs, nil
 		}
 		skip[big] = true // 该消息已裁到注记头，本轮裁剪无进展空间
 	}
-	return fmt.Errorf("llm: 输入自守恒失败：裁剪全部可裁正文后仍超窗口预算（%d > %d rune，context too long）——请缩小输入或换更大窗口的模型",
+	// L4 组丢弃兜底（#202）：ToolCalls 主导的超限（参数 JSON 占大头、正文已
+	// 裁尽）——参数 JSON 不可截断（截断的调用不可重放，协议完整性优先），
+	// 整组丢弃最早的非保护工具轮换一条注记（组内任一成员携带提醒信封/
+	// tool-error 即跳过——模型自纠依据不丢）。保最近 fitkit.KeepRecentGroups
+	// 轮不动（wrap microcompact 同款窗口）。
+	for total > limit {
+		gs := fitkit.ToolGroups(msgs)
+		if len(gs) <= fitkit.KeepRecentGroups {
+			break
+		}
+		picked := false
+		for _, g := range gs[:len(gs)-fitkit.KeepRecentGroups] {
+			if fitkit.GroupProtected(msgs, g) {
+				continue
+			}
+			gsum := 0
+			for _, i := range g {
+				gsum += sizes[i]
+			}
+			if gsum <= fitkit.GroupNoteRunes {
+				continue // 丢弃后不缩反涨：跳过，试下一组
+			}
+			ann := &schema.Message{Role: schema.Assistant, Content: fitkit.GroupDropNote}
+			last := g[len(g)-1]
+			msgs = append(msgs[:g[0]], append([]*schema.Message{ann}, msgs[last+1:]...)...)
+			// 下标已重排：sizes/total 全量重算（病理态路径，正确性优先）
+			sizes = make([]int, len(msgs))
+			total = 0
+			for i, m := range msgs {
+				sizes[i] = MsgRuneCount(m)
+				total += sizes[i]
+			}
+			picked = true
+			break
+		}
+		if !picked {
+			break
+		}
+		if total <= limit {
+			return msgs, nil
+		}
+	}
+	// 仍超限：相邻丢弃注记合并为一条汇总注记（同 wrap L4 收尾，#202）——
+	// 注记自身占位在丢弃轮多时会吃满剩余预算，合并是纯汇总；合并后入窗即
+	// 成功收口。
+	if total > limit {
+		if coalesced, saved := fitkit.CoalesceDropNotes(msgs); saved > 0 {
+			msgs = coalesced
+			total -= saved
+			if total <= limit {
+				return msgs, nil
+			}
+		}
+	}
+	return msgs, fmt.Errorf("llm: 输入自守恒失败：裁剪全部可裁正文并丢弃历史工具轮后仍超窗口预算（%d > %d rune，context too long）——请缩小输入或换更大窗口的模型",
 		total, limit)
 }
 
@@ -663,7 +731,7 @@ func longestTrimable(msgs []*schema.Message, sizes []int, skip []bool) int {
 		default:
 			continue
 		}
-		if isProtectedResult(m.Content) {
+		if fitkit.IsProtectedResult(m.Content) {
 			continue // 错误/提醒结果保护（wrap L3 同款）：模型自纠依据不裁
 		}
 		if big < 0 || sizes[i] > sizes[big] {
@@ -689,11 +757,4 @@ func trimMsgContent(msgs []*schema.Message, sizes []int, idx int, keep int) int 
 	msgs[idx] = &cloned
 	sizes[idx] = n
 	return delta
-}
-
-// isProtectedResult 错误/提醒结果保护（wrap/fit.go L3 同款语义，根包侧镜像）：
-// 携带提醒信封（含 tool-error 标记）的结果是模型自纠与规则遵循的依据，
-// 窗口裁剪不碰。两处实现须保持一致（wrap 不被根包导入，无法单源）。
-func isProtectedResult(content string) bool {
-	return strings.Contains(content, "<system-reminder>") || strings.Contains(content, "【tool-error】")
 }

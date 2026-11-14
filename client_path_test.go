@@ -193,7 +193,7 @@ func TestFitInputTruncatesLongestUser(t *testing.T) {
 		schema.UserMessage(short),
 		schema.UserMessage(long),
 	}
-	if err := c.fitInput(msgList); err != nil {
+	if _, err := c.fitInput(msgList); err != nil {
 		t.Fatal(err)
 	}
 	if len([]rune(msgList[2].Content)) >= 200 {
@@ -211,7 +211,7 @@ func TestFitInputWithinLimit(t *testing.T) {
 	c := &Client{ContextTokens: 1_000_000, MaxOutputTokens: 50_000}
 	original := "正常长度消息"
 	msgList := []*schema.Message{schema.UserMessage(original)}
-	if err := c.fitInput(msgList); err != nil {
+	if _, err := c.fitInput(msgList); err != nil {
 		t.Fatal(err)
 	}
 	if msgList[0].Content != original {
