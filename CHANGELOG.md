@@ -21,6 +21,10 @@ root（#202）：fitInputFor 收敛失败前新增 L4 组丢弃档，并把签�
 调用点（Generate/boost 重试/GenerateJSON）与 Resilient.prepare 同步接线。
 参数 JSON 不可截断的协议完整性边界保持（截断的调用不可重放）。
 
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.48.0 → v0.49.0
+
+pkg v0.49.0（审计批量收口+七单下沉新包）发布后的地板跟进。
+
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.36.1 → v0.37.0
 
 scanrotation 新包（周期扫描记账件）发布后的地板跟进。
