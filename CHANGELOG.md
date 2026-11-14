@@ -2,6 +2,30 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.25.0] — 2026-11-15
+
+### 修复(llm)：窗口治理收口三单——fitkit 单源(#201)/wrap L4 组丢弃(#200)/root L4 组丢弃(#202)
+
+internal/fitkit 新包（零根包依赖，仅 eino schema）：
+- IsProtectedResult 错误/提醒结果保护判定单源——client.go 与 wrap/fit.go
+  双份实现收敛，漂移回归钉（#201）；
+- ToolGroups/GroupProtected/KeepRecentGroups/GroupDropNote 组语义单源；
+- CoalesceDropNotes 相邻丢弃注记合并——注记占位在丢弃轮多时会吃满
+  剩余预算（15×41 rune ≈ 一轮中等参数），纯汇总不碰工具轮。
+wrap（#200）：FitMessages 新增 L4 组丢弃档——ToolCalls 主导超限（参数
+JSON 占大头、正文无可裁）不再 FitPass 直通：整组丢弃最早的非保护工具
+轮（assistant+配对结果）换注记，tool_call/tool_result 配对一致性由组粒
+度移除保持；FitResult 增 Dropped 计数与 4 个组合标签（观测面只增不改）。
+root（#202）：fitInputFor 收敛失败前新增 L4 组丢弃档，并把签名改为返回
+（可能收短后的）消息列——组丢弃改变消息条数，切片头无法原地传播；三个
+调用点（Generate/boost 重试/GenerateJSON）与 Resilient.prepare 同步接线。
+参数 JSON 不可截断的协议完整性边界保持（截断的调用不可重放）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.36.1 → v0.37.0
+
+scanrotation 新包（周期扫描记账件）发布后的地板跟进。
+
+
 ## [v0.24.0] — 2026-11-14
 
 ### 新增(wrap)：下沉在飞闸与熔断模型装饰器
