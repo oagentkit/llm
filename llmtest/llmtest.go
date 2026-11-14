@@ -42,8 +42,10 @@ func ToolCall(name, arguments string) []schema.ToolCall {
 //   - Script 按调用序消费；RepeatLast=true 时耗尽后重复末条（重试/降级链测试：
 //     持续错误才能触发切换），false 时耗尽报错（防桩被多调——脚本写漏立即可见）；
 //   - FirstInput/LastInput 记录每次 Generate 的首/末消息文本（提示词断言用）；
-//   - StreamContent 非空时 Stream 返回该内容的单块流（优先于脚本），空则回落到
-//     脚本条目——Generate/Stream 共享同一调用序，脚本为空/耗尽才报错；
+//   - StreamContent 非空时 Stream 返回该内容的单块流（优先于脚本，**不取脚本
+//     条目**——llm#196：脚本序只由真正取脚本的调用推进，此前以 Calls 为脚本
+//     下标，捷径推进 Calls 会把脚本序号凭空推进一格，随后的 Generate 取到
+//     错位条目）；空则回落到脚本条目——Generate/Stream 共享同一脚本序；
 //   - Calls 为 Generate+Stream 总调用数（含脚本耗尽/空脚本那几次报错的调用——
 //     与耗尽错误里的「第 N 次调用」同源，报的是真实调用序）。
 type Model struct {
@@ -51,7 +53,8 @@ type Model struct {
 
 	Script     []Resp
 	RepeatLast bool
-	// StreamContent Stream 路径的单块内容：非空时优先于脚本，空 = 按脚本条目出流。
+	// StreamContent Stream 路径的单块内容：非空时优先于脚本（不消费脚本条目），
+	// 空 = 按脚本条目出流。
 	StreamContent string
 
 	// 断言面（测试读取）。
@@ -64,6 +67,11 @@ type Model struct {
 	// 提示词组装断言用）。
 	Flats []string
 	Calls int
+
+	// scriptIdx 已消费的脚本条目数（llm#196）：与 Calls 解耦——StreamContent
+	// 恒定内容流不取脚本条目，脚本序只由真正取脚本的调用推进；混合形态
+	// （Script + StreamContent 同置）下「脚本写漏立即可见」的耗尽保护不失效。
+	scriptIdx int
 }
 
 // Generate 按 Script 依次响应。
@@ -124,6 +132,9 @@ func (m *Model) Stream(_ context.Context, in []*schema.Message, _ ...model.Optio
 		m.Flats = append(m.Flats, flatMsgs(in))
 	}
 	if m.StreamContent != "" {
+		// 恒定内容流不取脚本条目（llm#196）：只递增 Calls（真实调用序），脚本
+		// 序号由 next() 的 scriptIdx 独立推进——此前复用 Calls 作脚本下标，
+		// 捷径把序号凭空推进一格，随后 Generate 取到错位条目，耗尽保护失效。
 		m.Calls++
 		return msgStream(&schema.Message{Role: schema.Assistant, Content: m.StreamContent}), nil
 	}
@@ -164,19 +175,22 @@ func msgStream(msg *schema.Message) *schema.StreamReader[*schema.Message] {
 // 都在这里自增 Calls——让 Calls 与错误消息里的「第 N 次调用」同源反映真实
 // 调用序（oagentkit/llm#167D：此前耗尽分支不自增、Calls 停在 len(Script)，
 // 连续耗尽永远报同一个「第 2 次调用」）。
+// 脚本位置用独立的 scriptIdx（llm#196）：只在真正取走一个条目时推进——
+// StreamContent 捷径只递增不取条目，脚本序不再被凭空跳格。
 func (m *Model) next() (Resp, error) {
 	m.Calls++
 	if len(m.Script) == 0 {
 		return Resp{}, fmt.Errorf("llmtest: 脚本为空（第 %d 次调用）", m.Calls)
 	}
-	idx := m.Calls - 1
-	if idx >= len(m.Script) {
+	if m.scriptIdx >= len(m.Script) {
 		if m.RepeatLast {
 			return m.Script[len(m.Script)-1], nil
 		}
 		return Resp{}, fmt.Errorf("llmtest: 脚本耗尽（第 %d 次调用）", m.Calls)
 	}
-	return m.Script[idx], nil
+	resp := m.Script[m.scriptIdx]
+	m.scriptIdx++
+	return resp, nil
 }
 
 // ToolModel 带 WithTools 派生能力的桩（ADK 绑工具路径的降级语义测试用；
