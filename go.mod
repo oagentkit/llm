@@ -9,7 +9,7 @@ require (
 	github.com/oagentkit/textx v0.12.0
 	github.com/oekit/concurrency v0.37.0
 	github.com/oekit/logx v0.11.0
-	github.com/oekit/pkg v0.48.0
+	github.com/oekit/pkg v0.49.0
 )
 
 require (
