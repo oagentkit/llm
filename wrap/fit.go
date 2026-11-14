@@ -1,11 +1,14 @@
 // 上下文窗口治理（对标 ZCode compact/microcompact + context-usage-breakdown）：
-// BaseChatModel 装饰器，发送前输入自守恒，三级递进——
+// BaseChatModel 装饰器，发送前输入自守恒，四级递进——
 //
-//	L1 microcompact：更早的工具结果内容置换占位（保最近 keepRecentTools 条不动；
+//	L1 microcompact：更早的工具结果内容置换占位（保最近 KeepRecentGroups 轮不动；
 //	  只替换内容、不动消息条数与 tool_call/tool_result 配对，语法安全）；
 //	  清理量不足 minClearSavings 时放弃（不值得损失信息）；
 //	L2 截最长 user 消息（与 llm.Client.fitInput 同策略，TruncNote 留痕）；
-//	L3 病理态兜底：迭代截最大工具结果直至入窗。
+//	L3 病理态兜底：迭代截最大工具结果直至入窗；
+//	L4 组丢弃兜底（#200）：ToolCalls 主导的超限（参数 JSON 占大头、正文无可裁）
+//	  ——参数 JSON 不可截断（截断的调用不可重放，协议完整性优先），整组丢弃
+//	  最早的非保护工具轮（assistant + 其配对结果）换一条注记，配对一致。
 //
 // 触发线与估算口径对齐 llm fitInput：rune 计数，limit=(窗口-输出预留)×3/2×0.9（CJK 感知）。
 // 真实 usage 校准（对标 ZCode tokenSource=provider_usage）——**实例内响应
@@ -22,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -31,6 +33,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/oagentkit/llm"
+	"github.com/oagentkit/llm/internal/fitkit"
 	"github.com/oagentkit/textx/textutil"
 	"github.com/oekit/concurrency/async"
 )
@@ -38,9 +41,6 @@ import (
 // ---------- 拟合内核（纯函数，不改调用方切片与消息） ----------
 
 const (
-	// keepRecentRounds microcompact 保留最近 N 个 assistant 轮的工具结果组
-	//（compact 同款组粒度：组 = 一个 assistant(带 ToolCalls) 之后连续的工具结果）。
-	keepRecentRounds = 5
 	// minClearSavings 清理量门槛（256 token 当量，口径 1 token≈2 rune）：
 	// 不值得损失信息的清理不做。
 	minClearSavings = 256 * 2
@@ -52,33 +52,8 @@ const (
 // len(toolPlaceholder) 是 46，与 rune 口径混用会漏放 25~46 rune 的小结果）。
 var phRunes = utf8.RuneCountInString(toolPlaceholder)
 
-// isProtectedResult 错误/提醒结果保护（compact「出错结果默认保留」同款语义）：
-// 携带提醒信封（含 tool-error 标记）的结果是模型自纠与规则遵循的依据，不清理。
-func isProtectedResult(content string) bool {
-	return strings.Contains(content, "<system-reminder>") || strings.Contains(content, "【tool-error】")
-}
-
-// toolGroups 划分工具结果轮次组：一个 assistant（带 ToolCalls）开启一轮，其后
-// 连续的 Tool 消息属该组。返回每组的消息下标切片（按出现序）。孤立工具结果
-// （无所属 assistant 轮）不入组——保守不清理。
-func toolGroups(msgs []*schema.Message) (groups [][]int) {
-	for i := 0; i < len(msgs); {
-		if msgs[i].Role == schema.Assistant && len(msgs[i].ToolCalls) > 0 {
-			i++
-			var g []int
-			for i < len(msgs) && msgs[i].Role == schema.Tool {
-				g = append(g, i)
-				i++
-			}
-			if len(g) > 0 {
-				groups = append(groups, g)
-			}
-			continue
-		}
-		i++
-	}
-	return groups
-}
+// groupNoteRunes 组丢弃注记的 rune 长度（L4 的「丢弃后必须变小」守卫基准）。
+var groupNoteRunes = utf8.RuneCountInString(fitkit.GroupDropNote)
 
 // FitAction 拟合动作（观测标签；passthrough 应占绝对多数）。
 type FitAction string
@@ -88,6 +63,11 @@ const (
 	FitMicro      FitAction = "microcompact" // 仅 L1
 	FitTruncated  FitAction = "truncated"    // L2/L3（无 L1 或 L1 不足）
 	FitMicroTrunc FitAction = "micro+trunc"  // L1+L2/L3
+	// L4 组丢弃档（#200）与既有档的组合（新增标签，观测面只增不改）。
+	FitDropped        FitAction = "dropped"              // 仅 L4
+	FitMicroDropped   FitAction = "microcompact+dropped" // L1+L4
+	FitTruncDropped   FitAction = "trunc+dropped"        // L2/L3+L4
+	FitMicroTruncDrop FitAction = "micro+trunc+dropped"  // L1+L2/L3+L4
 )
 
 // FitResult 拟合结果（rune 口径）。
@@ -97,6 +77,7 @@ type FitResult struct {
 	After   int
 	Limit   int // 生效字符预算
 	Cleared int // L1 清理的工具结果条数
+	Dropped int // L4 丢弃的工具轮组数（#200）
 }
 
 // FitMessages 两级拟合纯内核。limitChars ≤0 或未超限时原样返回（同一切片，
@@ -115,17 +96,22 @@ func FitMessages(msgs []*schema.Message, limitChars int) ([]*schema.Message, Fit
 	}
 
 	// L1 microcompact（轮次组粒度）：按 assistant 轮分组，更早轮的
-	// 工具结果清内容（保最近 keepRecentRounds 轮）；错误/提醒结果保护不清理。
+	// 工具结果清内容（保最近 fitkit.KeepRecentGroups 轮）；错误/提醒结果
+	// 保护不清理。组内 assistant 本体不参与内容置换（它是调用发起方，置换
+	// 正文会破坏语义；组丢弃才整组处理，见 L4）。
 	// sizes 缓存整趟消息的 rune 数，免每层重复 len([]rune()) 分配（热路径）。
 	out := copyMsgs(msgs)
 	sizes := msgRunes(out)
 	saved, cleared := 0, 0
-	groups := toolGroups(out)
-	if len(groups) > keepRecentRounds {
-		for _, g := range groups[:len(groups)-keepRecentRounds] {
+	groups := fitkit.ToolGroups(out)
+	if len(groups) > fitkit.KeepRecentGroups {
+		for _, g := range groups[:len(groups)-fitkit.KeepRecentGroups] {
 			for _, i := range g {
+				if out[i].Role != schema.Tool {
+					continue
+				}
 				l := sizes[i]
-				if l <= phRunes || isProtectedResult(out[i].Content) {
+				if l <= phRunes || fitkit.IsProtectedResult(out[i].Content) {
 					continue
 				}
 				cloned := *out[i] // 消息结构克隆替换：浅拷贝切片仍共享元素指针，直改会污染调用方
@@ -181,7 +167,7 @@ func FitMessages(msgs []*schema.Message, limitChars int) ([]*schema.Message, Fit
 		for i, m := range out {
 			// 置换后必须变小（第八轮审计 C 级修复）：≤ 占位符长度的候选置换后
 			// 不缩反涨，选中即零进展死循环——小结果（"OK"/"done"级）不参与 L3
-			if m.Role == schema.Tool && !isProtectedResult(m.Content) && sizes[i] > phRunes &&
+			if m.Role == schema.Tool && !fitkit.IsProtectedResult(m.Content) && sizes[i] > phRunes &&
 				(big < 0 || sizes[i] > sizes[big]) {
 				big = i
 			}
@@ -204,8 +190,66 @@ func FitMessages(msgs []*schema.Message, limitChars int) ([]*schema.Message, Fit
 		truncated = true
 	}
 
+	// L4 组丢弃兜底（#200）：正文裁尽仍超限的 ToolCalls 主导形态——参数 JSON
+	// 不可截断（截断的调用不可重放，协议完整性优先），整组丢弃最早的非保护
+	// 工具轮（assistant + 其配对结果）换一条注记：tool_call/tool_result 配对
+	// 一致性由「组粒度移除」保持，注记留痕可审计。保护语义同全级别：组内任
+	// 一成员携带提醒信封/tool-error 即跳过（模型自纠依据不丢）。
+	dropped := 0
+	for total > limitChars {
+		gs := fitkit.ToolGroups(out)
+		if len(gs) <= fitkit.KeepRecentGroups {
+			break
+		}
+		picked := false
+		for _, g := range gs[:len(gs)-fitkit.KeepRecentGroups] {
+			if fitkit.GroupProtected(out, g) {
+				continue
+			}
+			gsum := 0
+			for _, i := range g {
+				gsum += sizes[i]
+			}
+			if gsum <= groupNoteRunes {
+				continue // 丢弃后不缩反涨：跳过，试下一组
+			}
+			ann := &schema.Message{Role: schema.Assistant, Content: fitkit.GroupDropNote}
+			rebuilt := make([]*schema.Message, 0, len(out)-len(g)+1)
+			last := g[len(g)-1]
+			rebuilt = append(rebuilt, out[:g[0]]...)
+			rebuilt = append(rebuilt, ann)
+			rebuilt = append(rebuilt, out[last+1:]...)
+			out = rebuilt
+			sizes = msgRunes(out)
+			total = runeTotal(out)
+			dropped++
+			picked = true
+			break // 下标已重排，重新分组再选
+		}
+		if !picked {
+			break
+		}
+	}
+	// 仍超限：相邻丢弃注记合并为一条汇总注记（#200）——注记自身占位在丢弃
+	// 轮多时会吃满剩余预算（15×41 rune ≈ 一轮中等参数），合并是纯汇总。
+	if total > limitChars {
+		if coalesced, saved := fitkit.CoalesceDropNotes(out); saved > 0 {
+			out = coalesced
+			total -= saved
+		}
+	}
 	res.After = total
+	res.Dropped = dropped
+	// truncated 只由 L2/L3 置位、dropped 只由 L4 计数，标签按真实发生面组合。
 	switch {
+	case res.Cleared > 0 && truncated && dropped > 0:
+		res.Action = FitMicroTruncDrop
+	case res.Cleared > 0 && dropped > 0:
+		res.Action = FitMicroDropped
+	case truncated && dropped > 0:
+		res.Action = FitTruncDropped
+	case dropped > 0:
+		res.Action = FitDropped
 	case res.Cleared > 0 && !truncated:
 		res.Action = FitMicro
 	case res.Cleared > 0:

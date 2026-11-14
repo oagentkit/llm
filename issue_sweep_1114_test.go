@@ -62,7 +62,7 @@ func TestFitInputSeesToolCalls_Issue187(t *testing.T) {
 		schema.UserMessage(user),
 		{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{Function: schema.FunctionCall{Name: "f", Arguments: args}}}},
 	}
-	if err := c.fitInput(msgList); err != nil {
+	if _, err := c.fitInput(msgList); err != nil {
 		t.Fatalf("user 截断后应入窗: %v", err)
 	}
 	if utf8Len(msgList[0].Content) >= 100 {
@@ -88,7 +88,7 @@ func TestFitInputWithoutUserFallsBackToTool_Issue188(t *testing.T) {
 		schema.SystemMessage(sys),
 		{Role: schema.Tool, Content: tool},
 	}
-	if err := c.fitInput(msgList); err != nil {
+	if _, err := c.fitInput(msgList); err != nil {
 		t.Fatalf("tool 正文可裁，应收敛入窗: %v", err)
 	}
 	if utf8Len(msgList[1].Content) >= 200 {
@@ -110,7 +110,7 @@ func TestFitInputLoopsUntilFit_Issue188(t *testing.T) {
 		schema.UserMessage(strings.Repeat("问", 200)),
 		{Role: schema.Tool, Content: strings.Repeat("果", 200)},
 	}
-	if err := c.fitInput(msgList); err != nil {
+	if _, err := c.fitInput(msgList); err != nil {
 		t.Fatalf("回环裁剪应入窗: %v", err)
 	}
 	if MsgsRuneCount(msgList) > 121 {
@@ -129,7 +129,7 @@ func TestFitInputUnconvergedIsDiagnosable_Issue188(t *testing.T) {
 	c := &Client{ContextTokens: 100, MaxOutputTokens: 10}
 	sys := strings.Repeat("系统", 250)
 	msgList := []*schema.Message{schema.SystemMessage(sys)}
-	err := c.fitInput(msgList)
+	_, err := c.fitInput(msgList)
 	if err == nil {
 		t.Fatal("无可裁对象且超限，应报错而非静默直通")
 	}
