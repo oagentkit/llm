@@ -2,6 +2,66 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.26.0] — 2026-11-16
+
+### 修复(llm)：重试观测钩子/类型化耗尽/谓词覆盖 + 通用状态码分类(#209,#210)
+
+#209 RateLimitRetryModel（RawModel 直驱路径的 429 退避装饰）补齐宿主收编
+所需的三个契约：
+- WithOnRetry：退避等待结束后、下一次物理调用发起前触发；等待期 ctx 取消
+  不触发（决定重试时点回调会把「打算重试」谎报成「已重试」）。attempt 为
+  即将发起的物理调用序号（1 基），lastErr 为上一次物理失败原值。
+- WithOnExhausted：所有 attempts 失败且末次仍可重试时恰触发一次。
+- WithRetryPredicate：覆盖判定面，缺省仍 IsRateLimitError；只改重试判定，
+  退避曲线不变。
+- RetryExhaustedError{Attempts,Last}：Unwrap 保留原始错误链（errors.Is/As
+  可穿透），Retryable() 实现 guardx/toolfail RetryableReporter 鸭子契约
+  （nil 接收者返回 false）。
+- IsRateLimitError 文档写明只面向模型层错误，点明 throttl / "rate limit"
+  散文词在复合错误/自由文本中的误判边界与 4 次退避代价。
+#210 llm/errors 结构化状态码通道从 go-openai 具体类型放宽为 provider 可扩展
+契约：错误链上实现 HTTPStatusCode() int（兼容 StatusCode() int）即优先采信，
+*openai.RequestError 特例保留，无状态码仍文本兜底。ClassifyLLMError 文档
+写明 provider 层应实现 HTTPStatusCode() int。
+测试：新增 issue_209_test.go / issue_210_test.go 钉死钩子时点（等待后调用前、
+等待期取消不触发）、耗尽恰一次与 errors.As/Is/Retryable、谓词放行/收窄、
+自定义 HTTPStatusCode/StatusCode（指针与值接收者、fmt 包装）、openai 特例
+不变与 #64/#78/#114/#125 文本黄金口径不回归。
+验证：make ci（gofmt + go vet + go test -race -count=1 ./...）全绿；
+go mod tidy -diff 无漂移。
+Fixes #209
+Fixes #210
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.38.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.37.0` | `v0.38.0` |
+| `github.com/oekit/pkg` | `v0.50.0` | `v0.51.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.50.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.49.0` | `v0.50.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.25.0] — 2026-11-15
 
 ### 修复(llm)：窗口治理收口三单——fitkit 单源(#201)/wrap L4 组丢弃(#200)/root L4 组丢弃(#202)
