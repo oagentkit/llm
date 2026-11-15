@@ -33,9 +33,13 @@ var (
 )
 
 // ClassifyLLMError 判定是否值得重试及错误类型。
-// 分类优先级：结构化 HTTP 状态码（go-openai RequestError）→ 文本 marker。
-// 确定性失败（鉴权/参数错/模型不存在/上下文超限等 4xx）不重试——重试纯浪费
-// 钱和延迟；429 可重试 + 退避下限提高；5xx/网络错误默认可重试。
+// 分类优先级：结构化 HTTP 状态码 → 文本 marker。结构化通道是可扩展契约
+// （llm#210）：错误链上任一错误实现 `HTTPStatusCode() int` 即被采信（provider
+// 层请让错误实现该方法），go-openai 的 *RequestError 作为既有特例保留——
+// 非 OpenAI provider（anthropic 兼容层/自建网关/宿主自己的 client）不再被迫
+// 退回文本启发式。确定性失败（鉴权/参数错/模型不存在/上下文超限等 4xx）不
+// 重试——重试纯浪费钱和延迟；429 可重试 + 退避下限提高；5xx/网络错误默认
+// 可重试。
 func ClassifyLLMError(err error) RetryHint {
 	if err == nil {
 		// nil 语义与 RetryableLLMError/IsRateLimitError/IsTruncatedError 对齐
@@ -81,6 +85,14 @@ func classifyByHTTPStatus(err error) (RetryHint, bool) {
 	}
 }
 
+// statusCoder 结构化状态码契约（llm#210）：provider 层错误实现
+// HTTPStatusCode() int 即被结构化判定采信——把「结构化」从「只服务一个 SDK」
+// 放宽为可扩展面。判四：errors.As 沿链提取，经 eino/网关/fmt 包装后仍可穿透。
+type statusCoder interface {
+	error
+	HTTPStatusCode() int
+}
+
 // isDeterministicFailure 文本判定确定性失败：鉴权/权限、参数错/模型不存在、
 // 非 408/429 的 4xx 状态码、上下文超限——任一命中即不重试。
 func isDeterministicFailure(msg string) bool {
@@ -107,8 +119,14 @@ func matchAny(msg string, markers []string) bool {
 }
 
 // httpStatus 提取结构化 HTTP 状态码（0 = 未知）。
-// 优先 errors.As 提取 go-openai 的 RequestError；错误链经 eino/网关包装后仍可穿透。
+// 通用接口先行（llm#210）：错误链上任一 HTTPStatusCode() int 的错误即采信；
+// go-openai *RequestError 既有特例保留（字段形态，未实现该方法）——判定顺序
+// 不变（结构化优先、文本兜底），只是结构化面放宽。错误链经 eino/网关包装后
+// 仍可穿透。
 func httpStatus(err error) int {
+	if sc, ok := errors.AsType[statusCoder](err); ok {
+		return sc.HTTPStatusCode()
+	}
 	if re, ok := errors.AsType[*openai.RequestError](err); ok {
 		return re.HTTPStatusCode
 	}
@@ -184,6 +202,12 @@ func isDigitToken(s string) bool {
 func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
 
 // IsRateLimitError 快速判定是否 429 类错误。
+//
+// 只面向模型层错误（供应商返回的 429/限流响应），不是面向任意复合文本的
+// 通用 helper（llm#209 附带边界提示）：判定含 "429"/"rate limit"/"throttl"
+// 等散文 marker——把含工具输出片段/模型自由文本的复合错误喂进来会误判
+// （一次误判 = 一整轮退避等待）。宿主按自己的错误码体系裁决重试面时，
+// 用 WithRateLimitRetry 的 WithRetryPredicate 注入谓词覆盖，而不是放宽本函数。
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false

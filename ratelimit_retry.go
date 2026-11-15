@@ -25,6 +25,11 @@
 // 上抛，交上层（Generator 重试骨架或降级链）按各自策略处置；流一旦建立即
 // 原样交还调用方（建流后的流生命周期归消费方，本层不触碰——agent#77 的
 // exactly-once Close 纪律在消费侧）。ctx 取消立即让位，不烧退避窗口。
+//
+// 观测与判定注入（llm#209）：WithOnRetry/WithOnExhausted 把「确实重试」与
+// 「重试耗尽=失败定型」落进宿主事件与指标；耗尽错误类型化为
+// *RetryExhaustedError（errors.As 可判 + Retryable 自报瞬态）；判定面可经
+// WithRetryPredicate 按宿主错误码体系覆盖（缺省与今日逐字一致）。
 package llm
 
 import (
@@ -73,11 +78,64 @@ func WithRetryJitterRatio(r float64) RateLimitRetryOption {
 	return func(c *rateLimitRetryConfig) { c.jitterRatio = r }
 }
 
+// WithOnRetry 重试观测钩子（llm#209）：每次「确实重试」时回调——时点在
+// 退避等待**结束后、下次物理调用发起前**。在「决定重试」时点回调会在等待期
+// ctx 取消时谎报重试（等待让位后并没有重试发生），故钩子挂在等待成功之后。
+//
+//	attempt = 刚失败的物理调用序号（1 基）；lastErr = 触发本次重试的错误。
+//	全序耗尽时恰被调用 attempts-1 次；成功恢复时调用次数 = 恢复前的失败数。
+func WithOnRetry(fn func(attempt int, lastErr error)) RateLimitRetryOption {
+	return func(c *rateLimitRetryConfig) { c.onRetry = fn }
+}
+
+// WithOnExhausted 耗尽观测钩子（llm#209）：退避重试全部耗尽、失败定型时
+// 回调一次——这是唯一能直接表达「LLM 不可用」的观测点（生产实弹 2026-10-22：
+// 整场 LLM 全挂而事件/指标/告警三处全静默）。attempts = 总尝试次数（含首次），
+// lastErr = 末次失败错误（与随后的 *RetryExhaustedError.Last 同源）。
+func WithOnExhausted(fn func(attempts int, lastErr error)) RateLimitRetryOption {
+	return func(c *rateLimitRetryConfig) { c.onExhausted = fn }
+}
+
+// WithRetryPredicate 重试谓词注入（llm#209）：覆盖缺省判定面（缺省 =
+// ClassifyLLMError→IsRateLimit，写死文本/结构化 429 启发式）。宿主可按自己的
+// 错误码体系收窄或放宽重试面。nil = 缺省判定（行为与今日逐字一致）。
+func WithRetryPredicate(fn func(error) bool) RateLimitRetryOption {
+	return func(c *rateLimitRetryConfig) { c.predicate = fn }
+}
+
+// RetryExhaustedError 429 退避重试耗尽的类型化出口（llm#209）。此前耗尽错误
+// 是普通 fmt 包装，下游 errors.As 判不出「失败已定型为瞬态耗尽」，节点级重试
+// 与改派分类失效。errors.As(err, *RetryExhaustedError) 判耗尽；
+// errors.Is 穿透 Unwrap 链直达末次原始错误；Retryable() 鸭子契约（不引入任何
+// 包依赖）供 toolfail 类分类器读「瞬态」。
+type RetryExhaustedError struct {
+	// Attempts 总尝试次数（含首次）——重试次数 = Attempts-1。
+	Attempts int
+	// Last 末次失败错误（耗尽时最后一次物理调用的错误）。
+	Last error
+}
+
+// Error 文案与既有 fmt 包装形态逐字同族（llm#209 前："llm: 429 退避重试
+// N 次仍限流: <lastErr>"），只多出类型化判定面，不换口径。
+func (e *RetryExhaustedError) Error() string {
+	return fmt.Sprintf("llm: 429 退避重试 %d 次仍限流: %v", e.Attempts-1, e.Last)
+}
+
+// Unwrap errors.Is 可穿透到末次原始错误（现有边界不变）。
+func (e *RetryExhaustedError) Unwrap() error { return e.Last }
+
+// Retryable 耗尽 = 瞬态失败的定型（鸭子契约，不引入任何包依赖）。
+func (e *RetryExhaustedError) Retryable() bool { return true }
+
 type rateLimitRetryConfig struct {
 	attempts   int
 	base, ceil time.Duration
 	// jitterRatio 初始 -1（哨兵：未设置）——显式 0（关抖动）不得被缺省覆盖。
 	jitterRatio float64
+	// onRetry/onExhausted/predicate 观测与判定注入（llm#209），nil = 缺省。
+	onRetry     func(attempt int, lastErr error)
+	onExhausted func(attempts int, lastErr error)
+	predicate   func(error) bool
 }
 
 func (c *rateLimitRetryConfig) fillDefaults() {
@@ -174,7 +232,8 @@ func (m *RateLimitRetryModel) Stream(ctx context.Context, input []*schema.Messag
 // retryRateLimitCall 退避重试骨架（Generate/Stream 共用，泛型收口两类返回值，
 // 成功拍直接返回真结果不重放）：attempt 1..attempts 执行 try；失败分类——
 // 非限流/ctx 取消立即上抛；限流失败按同源退避曲线（waitBackoffGap，含
-// Retry-After 取舍）等待后重试。耗尽上抛末个错误（%w 保留 errors.Is 链）。
+// Retry-After 取舍）等待后重试。耗尽上抛 *RetryExhaustedError（errors.Is 经
+// Unwrap 链直达末次原始错误，llm#209）。
 //
 // Retry-After sink 每轮物理调用前注入全新实例（llm#192）：hint 的生命周期 =
 // 单次失败。此前 sink 在环上游注入一次、整环复用——上一轮 429 带的
@@ -190,7 +249,12 @@ func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try 
 			// attemptCtx 是上一轮物理调用的 sink——只采信本次失败产生的建议
 			if err := waitBackoffGap(attemptCtx, attempt-1, m.cfg.base, m.cfg.ceil, true, m.jitter); err != nil {
 				var zero T
-				return zero, err // ctx 取消原样上抛
+				return zero, err // ctx 取消原样上抛（此时不触发 OnRetry：等待让位后重试并未发生）
+			}
+			// OnRetry 时点 = 等待结束后、物理调用发起前（llm#209）：在「决定
+			// 重试」时点回调会在等待期 ctx 取消时谎报（见上）。
+			if m.cfg.onRetry != nil {
+				m.cfg.onRetry(attempt-1, lastErr)
 			}
 		}
 		attemptCtx = WithRetryAfterSink(ctx)
@@ -202,12 +266,26 @@ func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try 
 			var zero T
 			return zero, ctx.Err() // 调用方中止：结果未知，不再烧后续尝试
 		}
-		if !ClassifyLLMError(err).IsRateLimit {
+		if !m.retryable(err) {
 			var zero T
 			return zero, err // 非限流失败不归本装饰器管
 		}
 		lastErr = err
 	}
+	// 耗尽：失败定型（llm#209）——钩子恰一次，错误类型化（errors.As 可判、
+	// errors.Is 穿透 Unwrap 到末次原始错误、Retryable 自报瞬态）。
+	if m.cfg.onExhausted != nil {
+		m.cfg.onExhausted(m.cfg.attempts, lastErr)
+	}
 	var zero T
-	return zero, fmt.Errorf("llm: 429 退避重试 %d 次仍限流: %w", m.cfg.attempts-1, lastErr)
+	return zero, &RetryExhaustedError{Attempts: m.cfg.attempts, Last: lastErr}
+}
+
+// retryable 重试判定：注入谓词优先（llm#209，宿主按自己的错误码体系裁决），
+// 缺省 ClassifyLLMError→IsRateLimit（结构化状态码 → 文本 marker）。
+func (m *RateLimitRetryModel) retryable(err error) bool {
+	if m.cfg.predicate != nil {
+		return m.cfg.predicate(err)
+	}
+	return ClassifyLLMError(err).IsRateLimit
 }
