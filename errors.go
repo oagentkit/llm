@@ -33,7 +33,13 @@ var (
 )
 
 // ClassifyLLMError 判定是否值得重试及错误类型。
-// 分类优先级：结构化 HTTP 状态码（go-openai RequestError）→ 文本 marker。
+// 分类优先级：结构化 HTTP 状态码 → 文本 marker。
+//
+// 结构化通道是 provider 层的可扩展契约（llm#210）：错误链上任一错误实现
+// `HTTPStatusCode() int`（或 `StatusCode() int`）即被采信，不再依赖具体 SDK
+// 类型或错误文案；go-openai 的 *RequestError 作为既有特例保留。provider 层
+// 请让错误实现 `HTTPStatusCode() int`——文本兜底只服务于无结构化码的错误，
+// 而文本 marker 天然受措辞影响（见 IsRateLimitError 的误判边界）。
 // 确定性失败（鉴权/参数错/模型不存在/上下文超限等 4xx）不重试——重试纯浪费
 // 钱和延迟；429 可重试 + 退避下限提高；5xx/网络错误默认可重试。
 func ClassifyLLMError(err error) RetryHint {
@@ -106,9 +112,31 @@ func matchAny(msg string, markers []string) bool {
 	return false
 }
 
+// statusCoder 结构化 HTTP 状态码契约（llm#210）：provider/SDK 自定义错误实现
+// 本接口即进入结构化判定，与具体厂商类型解耦（嵌 error 以便 errors.AsType
+// 在错误链上匹配）。
+type statusCoder interface {
+	error
+	HTTPStatusCode() int
+}
+
+// statusCodeProvider StatusCode() int 命名兼容（部分 SDK 用该形态）。
+type statusCodeProvider interface {
+	error
+	StatusCode() int
+}
+
 // httpStatus 提取结构化 HTTP 状态码（0 = 未知）。
-// 优先 errors.As 提取 go-openai 的 RequestError；错误链经 eino/网关包装后仍可穿透。
+// 判定顺序：通用接口 HTTPStatusCode() → StatusCode() → go-openai
+// *RequestError 特例；错误链经 eino/网关/fmt 包装后仍可穿透。都未命中返回 0，
+// 由调用方退回文本 marker 分类。
 func httpStatus(err error) int {
+	if sc, ok := errors.AsType[statusCoder](err); ok {
+		return sc.HTTPStatusCode()
+	}
+	if sc, ok := errors.AsType[statusCodeProvider](err); ok {
+		return sc.StatusCode()
+	}
 	if re, ok := errors.AsType[*openai.RequestError](err); ok {
 		return re.HTTPStatusCode
 	}
@@ -184,6 +212,19 @@ func isDigitToken(s string) bool {
 func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
 
 // IsRateLimitError 快速判定是否 429 类错误。
+//
+// 只面向模型层错误：语义是「模型调用失败是否由限流引起」，用于重试决策/
+// 退避门控。不要拿它判定含工具输出片段、模型自由文本、日志正文等复合文本的
+// 通用错误——文本兜底 marker 里含散文词 `throttl`（子串，命中 throttled/
+// throttling，也会命中自由文本里的 throttle 词族）与带空格的 `rate limit`
+// （可出现在文档/工具结果的自然语言里）。复合错误中的一次误判，按本仓缺省
+// 429 曲线（attempts=5）就要白等 4 次退避（5s+5s+8s+16s，未计抖动）。宿主若
+// 混入非模型层文本，请：
+//   - 让 provider 错误实现 HTTPStatusCode() int，走结构化通道；或
+//   - 用 WithRetryPredicate（RateLimitRetryModel）按自家错误码收窄判定面。
+//
+// 数字状态码 marker（429 等）按词边界匹配，"429ms"/"12.429" 这类耗时/小数
+// 文案不计入（llm#78/#114/#125）。
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
