@@ -20,11 +20,12 @@
 // 重入限速层时重新排队，与 bianque 实证形态一致（包装位=并发治理之外，退避
 // 等待不占在飞配额）。
 //
-// 刻意的边界：只重试限流类失败（ClassifyLLMError→IsRateLimit）——本装饰器的
-// 语义就是「429 退避」，非限流错误（401/上下文超限/截断/确定性 4xx）原样
-// 上抛，交上层（Generator 重试骨架或降级链）按各自策略处置；流一旦建立即
-// 原样交还调用方（建流后的流生命周期归消费方，本层不触碰——agent#77 的
-// exactly-once Close 纪律在消费侧）。ctx 取消立即让位，不烧退避窗口。
+// 刻意的边界：缺省只重试限流类失败（ClassifyLLMError→IsRateLimit）——本装饰器
+// 的语义就是「429 退避」，非限流错误（401/上下文超限/截断/确定性 4xx）原样
+// 上抛，交上层（Generator 重试骨架或降级链）按各自策略处置；WithRetryPredicate
+// 可覆盖判定面，但退避曲线仍是限流档。流一旦建立即原样交还调用方（建流后的
+// 流生命周期归消费方，本层不触碰——agent#77 的 exactly-once Close 纪律在
+// 消费侧）。ctx 取消立即让位，不烧退避窗口。
 package llm
 
 import (
@@ -73,11 +74,36 @@ func WithRetryJitterRatio(r float64) RateLimitRetryOption {
 	return func(c *rateLimitRetryConfig) { c.jitterRatio = r }
 }
 
+// WithOnRetry 重试观测钩子：在退避等待**结束后、下一次物理调用发起前**触发。
+// attempt 是即将发起的物理调用序号（1 基，取值 2..attempts），lastErr 是上一次
+// 物理失败原值。等待期 ctx 取消不会触发——该时点没有重试发生，若在「决定重试」
+// 时点回调，取消路径会把「打算重试」谎报成「已重试」。
+func WithOnRetry(fn func(attempt int, lastErr error)) RateLimitRetryOption {
+	return func(c *rateLimitRetryConfig) { c.onRetry = fn }
+}
+
+// WithOnExhausted 耗尽观测钩子：所有 attempts 都失败且末次失败仍被判可重试时
+// **恰触发一次**。attempts 是总物理尝试数（含首次），lastErr 是末次物理失败。
+// 非重试路径（非限流/谓词拒绝/ctx 取消）不触发。
+func WithOnExhausted(fn func(attempts int, lastErr error)) RateLimitRetryOption {
+	return func(c *rateLimitRetryConfig) { c.onExhausted = fn }
+}
+
+// WithRetryPredicate 覆盖重试判定面（缺省 IsRateLimitError）。谓词只决定
+// 「这次失败要不要再试」，不改变退避曲线（本装饰器恒用限流档曲线）。
+// 传 nil 等价于不设置（回落到缺省判定面）。
+func WithRetryPredicate(fn func(error) bool) RateLimitRetryOption {
+	return func(c *rateLimitRetryConfig) { c.retryPredicate = fn }
+}
+
 type rateLimitRetryConfig struct {
 	attempts   int
 	base, ceil time.Duration
 	// jitterRatio 初始 -1（哨兵：未设置）——显式 0（关抖动）不得被缺省覆盖。
-	jitterRatio float64
+	jitterRatio    float64
+	onRetry        func(attempt int, lastErr error)
+	onExhausted    func(attempts int, lastErr error)
+	retryPredicate func(error) bool
 }
 
 func (c *rateLimitRetryConfig) fillDefaults() {
@@ -94,6 +120,46 @@ func (c *rateLimitRetryConfig) fillDefaults() {
 		c.jitterRatio = defaultRetryJitterRatio
 	}
 }
+
+// RetryExhaustedError 退避重试耗尽错误（llm#209）：所有 attempts 都失败且
+// 末次失败仍被判可重试。
+//
+// Unwrap 保留末个原始错误链（errors.Is/errors.As 可穿透）；Retryable()
+// 实现宿主错误分类器（如 guardx/toolfail 的 RetryableReporter）的鸭子契约——
+// 耗尽本身是瞬态失败（通常交上层降级链/节点级重试处置），不是永久错误。
+type RetryExhaustedError struct {
+	// Attempts 总物理尝试数（含首次）。
+	Attempts int
+	// Last 末次物理失败（Unwrap 返回它）。
+	Last error
+}
+
+func (e *RetryExhaustedError) Error() string {
+	if e == nil {
+		return "llm: 限流退避重试耗尽"
+	}
+	if e.Attempts > 0 {
+		return fmt.Sprintf("llm: 重试 %d 次后仍失败（共 %d 次尝试）: %v", e.Attempts-1, e.Attempts, e.Last)
+	}
+	return fmt.Sprintf("llm: 限流退避重试耗尽: %v", e.Last)
+}
+
+// Unwrap 支持 errors.Is / errors.As 穿透到末个原始错误。
+func (e *RetryExhaustedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Last
+}
+
+// Retryable 自报瞬态。nil 接收者返回 false 且不解引用（guardx/toolfail 的
+// RetryableReporter 契约：分类器会对错误链上每一环直接调本方法）。
+func (e *RetryExhaustedError) Retryable() bool { return e != nil }
+
+// 编译期断言：耗尽错误满足宿主分类器的鸭子契约。
+type retryableReporter interface{ Retryable() bool }
+
+var _ retryableReporter = (*RetryExhaustedError)(nil)
 
 // RateLimitRetryModel 模型级限流退避装饰器（构建后只读，并发安全：无互斥状态）。
 type RateLimitRetryModel struct {
@@ -173,8 +239,10 @@ func (m *RateLimitRetryModel) Stream(ctx context.Context, input []*schema.Messag
 
 // retryRateLimitCall 退避重试骨架（Generate/Stream 共用，泛型收口两类返回值，
 // 成功拍直接返回真结果不重放）：attempt 1..attempts 执行 try；失败分类——
-// 非限流/ctx 取消立即上抛；限流失败按同源退避曲线（waitBackoffGap，含
-// Retry-After 取舍）等待后重试。耗尽上抛末个错误（%w 保留 errors.Is 链）。
+// 非可重试（缺省谓词 = 限流判定）/ctx 取消立即上抛；可重试失败按同源退避曲线
+// （waitBackoffGap，含 Retry-After 取舍）等待后重试。耗尽返回
+// *RetryExhaustedError（Unwrap 保留末个原始错误链），并先触发 OnExhausted
+// 一次；OnRetry 在每轮等待结束后、物理调用发起前触发（llm#209）。
 //
 // Retry-After sink 每轮物理调用前注入全新实例（llm#192）：hint 的生命周期 =
 // 单次失败。此前 sink 在环上游注入一次、整环复用——上一轮 429 带的
@@ -183,6 +251,10 @@ func (m *RateLimitRetryModel) Stream(ctx context.Context, input []*schema.Messag
 func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try func(ctx context.Context) (T, error)) (T, error) {
 	var lastErr error
 	attemptCtx := ctx
+	retryable := m.cfg.retryPredicate
+	if retryable == nil {
+		retryable = IsRateLimitError // 缺省判定面与引入钩子/谓词之前逐字一致
+	}
 	for attempt := 1; attempt <= m.cfg.attempts; attempt++ {
 		if attempt > 1 {
 			// 首拍等待 = base（与 Client.generateRetry 的 0 基 attempt 曲线同源：
@@ -190,7 +262,12 @@ func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try 
 			// attemptCtx 是上一轮物理调用的 sink——只采信本次失败产生的建议
 			if err := waitBackoffGap(attemptCtx, attempt-1, m.cfg.base, m.cfg.ceil, true, m.jitter); err != nil {
 				var zero T
-				return zero, err // ctx 取消原样上抛
+				return zero, err // ctx 取消原样上抛（不触发 OnRetry——没有发生重试）
+			}
+			// 等待已结束、下一次物理调用尚未发起：此刻才是「确实重试了」的
+			// 可观测时点（llm#209）。
+			if m.cfg.onRetry != nil {
+				m.cfg.onRetry(attempt, lastErr)
 			}
 		}
 		attemptCtx = WithRetryAfterSink(ctx)
@@ -202,12 +279,15 @@ func retryRateLimitCall[T any](ctx context.Context, m *RateLimitRetryModel, try 
 			var zero T
 			return zero, ctx.Err() // 调用方中止：结果未知，不再烧后续尝试
 		}
-		if !ClassifyLLMError(err).IsRateLimit {
+		if !retryable(err) {
 			var zero T
-			return zero, err // 非限流失败不归本装饰器管
+			return zero, err // 非可重试失败不归本装饰器管
 		}
 		lastErr = err
 	}
+	if m.cfg.onExhausted != nil {
+		m.cfg.onExhausted(m.cfg.attempts, lastErr)
+	}
 	var zero T
-	return zero, fmt.Errorf("llm: 429 退避重试 %d 次仍限流: %w", m.cfg.attempts-1, lastErr)
+	return zero, &RetryExhaustedError{Attempts: m.cfg.attempts, Last: lastErr}
 }
