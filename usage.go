@@ -66,6 +66,14 @@ func labelsFrom(ctx context.Context) map[string]string {
 	return m
 }
 
+// UsageLabelsFrom 读回 ctx 上的归因标签（WithUsageLabels 注入的快照；未注入返回 nil）。
+//
+// 导出给追踪出口共用（obsx.NewOTelGenerationHandler 的 GenTraceOptions.Labels）：
+// 归因只有一份注入点，采账本与采 trace 必须读同一份快照——各读各的会让
+// 「用量事件里的 session」与「span 里的 session」在晚定型归因（选链回填模型名）
+// 之后出现分叉。返回的 map 是注入时的拷贝，调用方不得修改。
+func UsageLabelsFrom(ctx context.Context) map[string]string { return labelsFrom(ctx) }
+
 // UsageCallCounter 单作用域 LLM 调用轮次计数（原子递增）。
 type UsageCallCounter struct{ n atomic.Int64 }
 

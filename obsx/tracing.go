@@ -134,11 +134,34 @@ func DrainStreamUsage(sr *schema.StreamReader[callbacks.CallbackOutput]) (usage 
 // strings.Builder：只要 usage/model/finish 的调用方零内容拷贝（#173）。
 // 调用方负责 Close。
 func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput], accumulateContent bool) (usage *model.TokenUsage, modelName, finishReason, content string) {
-	var sb strings.Builder
+	usage, modelName, finishReason, content, _ = drainStreamFull(sr, accumulateContent, 0)
+	return
+}
+
+// DrainStreamContent 排空副本流并累计整条流的正文（Content + ReasoningContent）。
+//
+// generation span 用（obsx.NewOTelGenerationHandler）：eino 流式每帧只带增量，
+// 取末帧只有尾巴。byteBudget >0 时按字节截断累计（达上限后继续排空但不再拷贝——
+// 长输出不把观测面变成内存放大器）；≤0 表示不限。调用方负责 Close。
+func DrainStreamContent(sr *schema.StreamReader[callbacks.CallbackOutput], byteBudget int) (usage *model.TokenUsage, modelName, finishReason, content, reasoning string) {
+	return drainStreamFull(sr, true, byteBudget)
+}
+
+// drainStreamFull 与 drainStream 同源（帧形态/usage/finish 提取单源），
+// 额外累计 ReasoningContent 并支持字节预算。
+func drainStreamFull(sr *schema.StreamReader[callbacks.CallbackOutput], accumulateContent bool,
+	byteBudget int) (usage *model.TokenUsage, modelName, finishReason, content, reasoning string) {
+	var sb, rb strings.Builder
+	write := func(s string) {
+		if byteBudget > 0 && sb.Len() >= byteBudget {
+			return
+		}
+		sb.WriteString(s)
+	}
 	for {
 		v, err := sr.Recv()
 		if err != nil {
-			return usage, modelName, finishReason, sb.String()
+			return usage, modelName, finishReason, sb.String(), rb.String()
 		}
 		switch t := v.(type) {
 		case *model.CallbackOutput:
@@ -155,7 +178,10 @@ func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput], accumulateCo
 				finishReason = fr
 			}
 			if accumulateContent && t.Message != nil {
-				sb.WriteString(t.Message.Content)
+				write(t.Message.Content)
+				if byteBudget <= 0 || rb.Len() < byteBudget {
+					rb.WriteString(t.Message.ReasoningContent)
+				}
 			}
 		case *schema.Message:
 			if t == nil {
@@ -168,7 +194,10 @@ func drainStream(sr *schema.StreamReader[callbacks.CallbackOutput], accumulateCo
 				finishReason = fr
 			}
 			if accumulateContent {
-				sb.WriteString(t.Content)
+				write(t.Content)
+				if byteBudget <= 0 || rb.Len() < byteBudget {
+					rb.WriteString(t.ReasoningContent)
+				}
 			}
 		}
 	}
