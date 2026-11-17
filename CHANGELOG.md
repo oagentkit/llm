@@ -2,6 +2,53 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.27.0] — 2026-11-17
+
+### 新增(obsx)：新增 OTel generation span 发射端（Langfuse/Jaeger generation 视图）
+
+obsx 此前只有两种回调出口：NewUsageHandler 管账本、NewTracingHandler 管日志，
+**都不产 OTel span**。宿主把 oekit/tracing 的 OTLP exporter 指向 Langfuse/Jaeger
+时，trace 里只有宿主自己开的 span，看不到每一次 LLM 调用（prompt/completion、
+按模型维度、每次调用的 token 用量）——Langfuse 的 generation 视图是空的。
+新增 obsx.NewOTelGenerationHandler(GenTraceOptions)：
+- 四路回调 OnStart/OnEnd/OnError/OnEndWithStreamOutput（只注册 OnEnd 在开流下
+  一条都不产，与 usage.go 记录的失明同款）；
+- 流式异步排空副本流（同步排空会把真流式阻塞成全量批出；GoSafe 收 panic）；
+- 属性按 Langfuse 官方 OTel 摄取词表：langfuse.observation.type=generation、
+  input/output、model.name、usage_details + gen_ai.usage.*、finish_reasons；
+  归因标签按 "<prefix>.<key>" 落 span，session_id 额外映射 langfuse.session.id；
+- 正文采集缺省关，开启必须注入 Sanitize（本包不依赖宿主 PII 库），逐条限宽
+  截断留痕；关闭时仍写 input_length/output_length（「没采」≠「空」）；
+- 不新建 Provider：复用宿主用 oekit/tracing 装配的全局 provider。
+配套：
+- llm.UsageLabelsFrom(ctx)：导出归因标签读取面（账本与 trace 读同一份快照）。
+- obsx.DrainStreamContent(sr, byteBudget)：导出「累计正文（含 reasoning）」
+  的流排空，带字节预算；drainStream 改为委托同一实现（帧形态/usage/finish
+  提取仍单源）。
+测试：8 态（非流式/关采集/无脱敏按不采/流式不阻塞+全文/错误/脱敏/截断且
+JSON 合法/非模型组件过滤）。注意全局 TracerProvider 的 setDelegate 是一次性
+语义 ⇒ TestMain 装一次 recorder + 用例游标切窗口。
+门禁：make ci（gofmt -l / go vet / go test -race -count=1 ./...）全绿；
+go mod tidy -diff 无漂移。
+Closes #216
+
+## [v0.26.1] — 2026-11-16
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.52.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.51.0` | `v0.52.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.26.0] — 2026-11-16
 
 ### 修复(llm)：重试观测钩子/类型化耗尽/谓词覆盖 + 通用状态码分类(#209,#210)
@@ -619,6 +666,20 @@ close #100
 
 ## [v0.21.3] — 2026-11-08
 
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/logx v0.8.10
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/logx` | `v0.8.9` | `v0.8.10` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
 - 杂务(deps)：依赖地板追平 oekit BOM v0.2.9——pkg v0.37.4 / logx v0.8.10 / concurrency v0.28.4
 
 ## [v0.21.2] — 2026-11-08
@@ -897,6 +958,21 @@ Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
 |---|---|---|
 | `github.com/oekit/concurrency` | `v0.24.0` | `v0.25.1` |
 | `github.com/oekit/logx` | `v0.8.2` | `v0.8.3` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.8.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.7.2` | `v0.8.0` |
 ## 为什么
 矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
 （= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
@@ -1394,6 +1470,20 @@ $ go test -count=1 ./...         ok（5 个包）
 $ go test -count=1 -race ./...   ok（5 个包）
 ```
 关联：oagentkit/llm#26
+
+- 文档(changelog)：按新生成器规则重生成 CHANGELOG.md
+
+生成器修复（oagentkit/matrix-tools#43）落地：
+① `[round-N] ` 前缀被剥离 → conventional commit 解析不再失效，
+   **commit body 保留**（此前整段被丢弃，发布说明只剩标题）；
+② 非 conventional 提交也保留 body；
+③ `--check` 识别「待发版段」（预写了但还没打 tag 的那段）。
+本 PR 恢复的是**本就在 commit body 里**的正文（迁移步骤、代码块、
+判据锚点）——此前被 `[round-N] ` 前缀导致的解析失败丢弃了。
+**没有任何发布说明内容被删除**：删除的行都能在新增行里找到对应
+（规范化掉 `(#N)` 与 `[round-N] ` 前缀后逐行比对）。
+关联：oagentkit/matrix-tools#43、oagentkit/matrix-tools#40
+
 
 ## [v0.14.1] — 2026-10-20
 
