@@ -8,7 +8,7 @@ go get github.com/oagentkit/llm
 
 | 包 | 职责 |
 |---|---|
-| `obsx` | eino callbacks 体系的 LLM 调用追踪 + token 用量采集 + 分阶段打标（自 `obs/obsx` 迁入 v0.12.0） |
+| `obsx` | eino callbacks 体系的 LLM 调用追踪 + token 用量采集 + 分阶段打标（自 `obs/obsx` 迁入 v0.12.0）＋ **Langfuse Public API 只读客户端**（自 `obs/langfuse` 迁入，读写同域） |
 | `llm` | 模型客户端：多模型降级链、任务级预算、成本记账、分阶段路由、主备切换 |
 | `port` | **窄接口层**（不依赖 eino）：`Complete(ctx, req) (string, error)` 形态的降级链 / 预算 / 成本记账 |
 | `decision` | **判定面客户端**（非自回归判定模型，System One 协议：Jev/Laya/Kev/Clef…）：choice/score/noul 三原语 + 校准置信口径（本地算，两端同义） + mock/预热 |
@@ -44,7 +44,8 @@ import "github.com/oagentkit/llm"       // ✅ 根包（符号同名，调用点
 **tier 2** — 集成层，依赖 tier0/tier1 + 重第三方地板。
 
 - 本仓依赖的矩阵内仓：`textx`。
-  （`obsx` 已于 v0.12.0 从 `obs/obsx` 迁入本仓，`obs` 不再是外部依赖。）
+  （`obsx` 已于 v0.12.0 从 `obs/obsx` 迁入本仓，Langfuse 只读客户端已随
+  `obs/langfuse` 迁入同一包 ⇒ **`obs` 整仓不再是本仓的依赖面**。）
 
 ## 窄接口层（`port`）：不引 eino 的那一半
 
@@ -83,6 +84,29 @@ out, err := chain.Complete(ctx, port.Request{Prompt: "…", Stage: "R1"})
 
 两条路径**共用同一份**预算 / 成本 / 价表实现（`llm.CostTracker` 与 `port.CostTracker`
 是**同一个类型**），不会出现两套算账。
+
+## Langfuse 读端：把 trace 拉回来做观测报告
+
+`obsx` 此前只有**写/发射端**（`NewOTelGenerationHandler` 把每次 LLM 调用产成
+OTel generation span，宿主把 exporter 指向 Langfuse / Jaeger）。
+读端（Langfuse Public API 只读客户端）自 `obs/langfuse` 迁入同一包 ⇒ **读写同域**：
+「Langfuse 上有什么、是谁写进去的」一处能答全。
+
+```go
+c := obsx.NewClient("https://lf.example.com", pk, sk)   // BasicAuth pk:sk
+batch, err := c.FetchBatch(ctx, obsx.Query{
+    Limit: 100, Name: "agent", Tags: []string{"prod"},
+})
+// batch.Traces[i].Observations[j].UsageTokens() / .UsageCost()
+```
+
+- **降级语义**：单条详情失败（trace 被删的 404 这类）计 `batch.Skipped`、
+  不弃整批；**整体 ctx 取消/超时则上抛**（调用方 ctx 真的已死才判整体档——
+  net/http client 自身超时与整体 ctx 超时在 `errors.Is` 下不可分）。
+- **符号名与原 `obs/langfuse` 逐字一致** ⇒ 迁移只动 import 行，调用点零改动：
+  `github.com/oagentkit/obs/langfuse` → `github.com/oagentkit/llm/obsx`。
+- **依赖**：只用 `oekit/pkg`（httpjson）与 `oekit/concurrency`（fanout）——
+  本仓 go.mod 早已具备，下游**不需要新增任何模块依赖**（`go mod tidy` 无漂移）。
 
 ## 外部依赖地板
 
