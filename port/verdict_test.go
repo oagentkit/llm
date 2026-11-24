@@ -211,8 +211,12 @@ func TestVerdictOfPureFunction(t *testing.T) {
 	}
 	c := func(error) bool { return true }
 	err := errors.New("x")
-	if verdictOf(c, err) != verdictOf(c, err) {
-		t.Fatal("同一输入应恒得同一结论")
+	// 判据体是纯函数：同一输入恒得同一结论（不读包级可变状态、不看调用次序）。
+	want := verdictOf(c, err)
+	for range 3 {
+		if got := verdictOf(c, err); got != want {
+			t.Fatalf("同一输入应恒得同一结论: %+v vs %+v", got, want)
+		}
 	}
 }
 
