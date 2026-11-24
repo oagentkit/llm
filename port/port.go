@@ -85,6 +85,9 @@ type TokenCounter func(req Request, resp string) Usage
 // 默认口径：除 ctx 取消/超时外都算可重试。宿主应按自己的错误形态覆盖它——
 // 本包提供 ClassifyStatus（按 HTTP 状态码）覆盖最常见的 OpenAI 兼容场景，
 // 免得每个宿主各写一遍、各判错一遍。
+//
+// 该结论随错误出链外泄给宿主分类器（llm#227，见 RetryVerdictError）：
+// 宿主读到的与链内判定同源，不需要另建一套 bool 分类学。
 type Classifier func(err error) bool
 
 // ErrBudgetExhausted 任务 token 预算已耗尽（调用前拦下）。
@@ -202,6 +205,9 @@ func WithBackoff(base, max time.Duration) ChainOption {
 }
 
 // WithClassifier 覆盖错误分类（默认：除 ctx 取消/超时外都算可重试）。
+//
+// 分类结论随错误出链外泄（llm#227）：宿主读到的是**同一处**结论
+// （见 RetryVerdictError / RetryVerdictOf），不必另判一套。
 func WithClassifier(f Classifier) ChainOption {
 	return func(c *Chain) {
 		if f != nil {
@@ -286,8 +292,15 @@ func (c *Chain) Complete(ctx context.Context, req Request) (string, error) {
 // 每轮物理调用失败都做失败面记账（llm#191，与 eino 路径 Client.accountFailed
 // 同口径）；环内重试前复查预算（llm#186）——重试间隙预算被烧穿（本环失败面
 // 记账、并发任务共烧）则不再发起下一轮物理调用。
+//
+// 重试判定结论随错误出链（llm#227）：分类**只判一次**，结论以
+// RetryVerdictError 形态挂在出链错误上——宿主用 guardx/toolfail 的
+// Classify/Retryable 读到与链内同源的结论，不必再自建一套 bool 分类。
+// 用户主动中止（ctx 取消/超时）与预算/熔断这类链内控制错误不经分类，
+// 不带结论（没有判过的就没有结论可报）。
 func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint64) (string, error) {
 	var lastErr error
+	var lastVerdict RetryVerdict
 	for i := range c.attempts {
 		out, err := e.c.Complete(ctx, req)
 		if err == nil {
@@ -305,10 +318,15 @@ func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint
 			c.breakers.Abandon(e.name, gen)
 			return "", err
 		}
-		if !c.classify(err) {
+		// 分类只判一次（llm#227）：结论既决定「重试本环还是切下一环」，
+		// 也随错误出链外泄给宿主分类器（见 RetryVerdictError）——
+		// 同一处结论、两个读法，不派生第二套分类学。
+		verdict := verdictOf(c.classify, err)
+		lastVerdict = verdict
+		if !verdict.Retryable {
 			// 不可重试 → 真实失败，报一次 Failure 切下一环。
 			c.breakers.Failure(ctx, e.name, gen)
-			return "", err
+			return "", withVerdict(err, verdict)
 		}
 		if i+1 < c.attempts {
 			// 环内重试前复查预算（llm#186）：本环物理失败已发生（报一次真实
@@ -328,7 +346,7 @@ func (c *Chain) attempt(ctx context.Context, e chainEntry, req Request, gen uint
 	}
 	// 重试耗尽：整次领取报一次 Failure（解除半开探测占位含在内）。
 	c.breakers.Failure(ctx, e.name, gen)
-	return "", lastErr
+	return "", withVerdict(lastErr, lastVerdict)
 }
 
 // account 记账：预算累计 + 成本记录。
