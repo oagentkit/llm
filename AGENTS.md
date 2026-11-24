@@ -9,6 +9,8 @@
 ```
 `/`（module 根，包名 llm → import `github.com/oagentkit/llm`）
 `obsx/`  ← 自 obs 迁入（v0.12.0）：LLM 调用追踪 + token 用量 + 分阶段打标
+           ＋ Langfuse Public API **只读客户端**（自 `obs/langfuse` 迁入，读写同域：
+             写端是 otelgen.go 的 OTel generation 出口，读端是本仓 langfuse_read.go）
 `port/`  ← 窄接口层（**不引 eino**）：Complete(ctx, req) (string, error) 形态的
            降级链 / 任务级预算 / 成本记账；预算与成本内核由根包下沉而来，
            两条路径共用同一份实现（llm.CostTracker == port.CostTracker）
