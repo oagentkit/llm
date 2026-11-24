@@ -9,11 +9,7 @@ require (
 	github.com/oagentkit/textx v0.13.0
 	github.com/oekit/concurrency v0.40.0
 	github.com/oekit/logx v0.12.1
-<<<<<<< HEAD
-	github.com/oekit/pkg v0.61.1
-=======
 	github.com/oekit/pkg v0.61.2
->>>>>>> ede61e7 (build: 依赖地板对齐——pkg → v0.61.2)
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
