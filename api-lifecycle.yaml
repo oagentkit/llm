@@ -30,3 +30,7 @@ packages:
     level: Experimental
     since: v0.27.0
     reason: 窗口拟合共享内核单源（root fitInputFor 与 wrap FitModel 的共享判据，internal 仅本模块可见）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: conformance
+    level: Experimental
+    since: v0.27.0
+    reason: Completer 窄接口合规契约套件（面向第三方实现者的验收场景集，oekit cachetest 方法论移植）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
