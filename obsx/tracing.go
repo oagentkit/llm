@@ -1,5 +1,8 @@
 // Package obsx 可观测性扩展：对齐 eino callbacks 体系的 LLM 调用追踪。
 //
+// 生命周期: Experimental——观测/trace 面未过一个 minor 无 breaking 窗口
+// （api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // 核心组件 TracingHandler 是 eino callbacks.Handler 的实现——通过
 // callbacks.InitCallbacks(ctx, nil, handler) 注入后，eino 各组件
 // （ChatModel 等）在调用时自动触发 OnStart/OnEnd/OnError，无需侵入业务代码：

@@ -1,6 +1,9 @@
 // Package llmtest eino ChatModel/Provider 的脚本化测试桩——llm/reflection/router
 // 等包的测试共用（此前四份手写桩已漂移出两种耗尽语义与多种记录口径）。
 // 只进测试二进制，不进任何生产依赖图。
+//
+// 生命周期: Experimental——测试桩面未过一个 minor 无 breaking 窗口
+// （api-compat.md 晋级条件一），初值如实记为不承诺兼容。
 package llmtest
 
 import (

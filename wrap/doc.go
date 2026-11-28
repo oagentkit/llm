@@ -2,6 +2,9 @@
 // （ContinueModel）、限速（RateModel）、在飞闸（GovernorModel）、熔断
 // （BreakerModel）。五者职责正交、可任意组合。
 //
+// 生命周期: Experimental——五装饰器治理面未过一个 minor 无 breaking 窗口
+// （api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // 推荐组装顺序（内→外）：Rate→Governor→Breaker→Fit→Continue。
 //
 //   - Rate 最内层不变：物理调用同桶（与 Generator 链共享全局令牌桶；续写轮

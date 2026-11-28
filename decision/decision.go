@@ -1,5 +1,8 @@
 // Package decision 是 **System One 协议**（非自回归判定模型）的客户端。
 //
+// 生命周期: Experimental——System One 协议客户端未过一个 minor 无 breaking 窗口
+// （api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // # 它和本仓其它能力的区别
 //
 // 本仓其它部分都是**自回归生成模型**（chat）：有 messages 概念、输出散文、接
