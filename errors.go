@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -48,6 +49,16 @@ func ClassifyLLMError(err error) RetryHint {
 		//（oagentkit/llm#65）：nil 无失败可言，RetryHint{} 即「不可重试」——
 		// 此前这里返回 Retryable:true 与同文件 RetryableLLMError(nil)=false
 		// 自相矛盾，成功路径误传 nil 会被当成「可重试的失败」。
+		return RetryHint{}
+	}
+	// 取消最先判（llm#234 判据②的根修）：用户/宿主主动取消不是可重试的失败。
+	// 此前取消一路落到 default RetryHint{Retryable:true}——链内无害（重试前的
+	// waitRetryGap 撞死 ctx 立即上抛，不会真重试），但结论一旦随错误外泄给
+	// 宿主（toolfail 自报面 / ToolfailClass 映射），就是「对用户停掉的动作
+	// 重试」的事故。nil 与取消都归 RetryHint{}：不可分类即不可重试。
+	// 本地模型超时（attempt ctx 的 DeadlineExceeded）不走这里——那是瞬态，
+	// 归 Retryable:true（#222 三轴判据①）。
+	if errors.Is(err, context.Canceled) {
 		return RetryHint{}
 	}
 	// 结构化状态码优先：不受错误文案措辞影响
