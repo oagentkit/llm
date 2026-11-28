@@ -3,6 +3,9 @@
 // 工具轮组划分——两边各持一份，判据一侧调整时另一侧静默漂移。本包收拢
 // 两者，依赖面只有 eino schema（wrap 的零根包依赖约束不受影响：internal
 // 包仅本模块可见，且不反向依赖 root）。
+//
+// 生命周期: Experimental——窗口拟合共享判据未过一个 minor 无 breaking 窗口
+// （api-compat.md 晋级条件一），初值如实记为不承诺兼容。
 package fitkit
 
 import (

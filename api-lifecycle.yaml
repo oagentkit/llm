@@ -1,0 +1,32 @@
+# api-lifecycle 定级清单（判据同源 matrix-tools docs/adr/ADR-002 引用的
+# yi-nology/goagent-kernel docs/api-compat.md：breaking 四类 / 三级承诺 / 晋级三维）
+version: 1
+packages:
+  - pkg: llm
+    level: Experimental
+    since: v0.27.0
+    reason: LLM 客户端栈根包（客户端薄封装 / Provider 降级链 / 弹性客户端 / 三套记账与分阶段路由）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: port
+    level: Experimental
+    since: v0.27.0
+    reason: 多后端 Completer 窄接口（非 eino 宿主的模型可替换面，与根包共用预算/成本口径）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: wrap
+    level: Experimental
+    since: v0.27.0
+    reason: eino BaseChatModel 装饰器集（窗口拟合 / 续写 / 限速 / 在飞闸 / 熔断，直调旁路的治理面）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: llmtest
+    level: Experimental
+    since: v0.27.0
+    reason: eino ChatModel/Provider 脚本化测试桩（测试专用，不进任何生产依赖图）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: decision
+    level: Experimental
+    since: v0.27.0
+    reason: System One 协议（非自回归判定模型）客户端与置信度口径单源；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: obsx
+    level: Experimental
+    since: v0.27.0
+    reason: LLM 可观测面（eino callbacks 追踪/用量适配 + OTel generation span 发射）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容
+  - pkg: internal/fitkit
+    level: Experimental
+    since: v0.27.0
+    reason: 窗口拟合共享内核单源（root fitInputFor 与 wrap FitModel 的共享判据，internal 仅本模块可见）；未过一个 minor 无 breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容

@@ -1,5 +1,8 @@
 // Package port 是 oagentkit/llm 的**窄接口层**——本仓不依赖 eino 的那一半。
 //
+// 生命周期: Experimental——Completer 窄接口（模型可替换面）未过一个 minor 无
+// breaking 窗口（api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // # 为什么需要它
 //
 // 本仓全部对外能力原先都长在 eino 的类型上：

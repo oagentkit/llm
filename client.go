@@ -1,4 +1,8 @@
 // Package llm LLM 客户端栈（eino BaseChatModel 之上），本包唯一 package doc。
+//
+// 生命周期: Experimental——客户端/降级链/记账面未过一个 minor 无 breaking 窗口
+// （api-compat.md 晋级条件一），初值如实记为不承诺兼容。
+//
 // 文件族分工：
 //   - client/errors/config：客户端薄封装——生成失败指数退避+jitter 重试（429 退避
 //     下限提高）、JSON 输出解析失败带错误回喂重试、token 记账（优先响应 usage，
