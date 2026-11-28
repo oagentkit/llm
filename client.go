@@ -27,6 +27,7 @@ import (
 
 	"github.com/oagentkit/llm/internal/fitkit"
 	"github.com/oagentkit/llm/obsx"
+	"github.com/oagentkit/llm/port"
 	"github.com/oagentkit/textx/textutil"
 	"github.com/oekit/pkg/jsonrepair"
 	"github.com/oekit/pkg/mathx"
@@ -378,7 +379,21 @@ func (c *Client) generateRetry(ctx context.Context, stage string, msgs []*schema
 		lastErr = err
 		lastHint = ClassifyLLMError(err) // 每轮只分类一次，复用于重试决策/退避/截断提升
 	}
-	return nil, attempts, lastErr
+	// 结论随错误出链（llm#234）：循环里算出的 lastHint 此前在返回口被丢弃——
+	// 宿主拿到裸错误只能自己再判一遍（第三套分类学）。装饰复用 #227 的
+	// port.RetryVerdictError（鸭子 Retryable() ⇒ guardx/toolfail 自报面读到
+	// 与链内**同一份**结论；文案/Unwrap 全透传，errors.Is/As 判定链不断）。
+	// cancel 已在 ClassifyLLMError 收口为 RetryHint{}（判据②），外泄的 bool
+	// 对取消恒为 false。
+	if lastErr == nil {
+		// 无失败可装饰（maxAttempts=0 的零迭代历史形态是 (nil, 0, nil)）——
+		// 包一层 Err:nil 的非 nil 错误会把「无失败」变成「失败」。
+		return nil, attempts, nil
+	}
+	return nil, attempts, &port.RetryVerdictError{
+		Err:     lastErr,
+		Verdict: port.RetryVerdict{Retryable: lastHint.Retryable},
+	}
 }
 
 // sameModelRetryDecision 重试决策：chainFallback（降级链有备选）时仅"值得在同模型
