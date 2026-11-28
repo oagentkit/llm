@@ -85,6 +85,12 @@ out, err := chain.Complete(ctx, port.Request{Prompt: "…", Stage: "R1"})
 两条路径**共用同一份**预算 / 成本 / 价表实现（`llm.CostTracker` 与 `port.CostTracker`
 是**同一个类型**），不会出现两套算账。
 
+### 验证你的 Completer 合规
+
+1. 实现 `port.Completer` 接口，写一个 `conformance.Factory` 按 `Behavior` 构造你的 Completer。
+2. 测试里调 `conformance.Run(t, yourFactory)`——7 个子测试钉住降级/预算/分类/哨兵语义。
+3. 全绿即合规；有红即违反契约（仓内 `conformance.NewFakeFactory()` 是正对照参照）。
+
 ## Langfuse 读端：把 trace 拉回来做观测报告
 
 `obsx` 此前只有**写/发射端**（`NewOTelGenerationHandler` 把每次 LLM 调用产成
